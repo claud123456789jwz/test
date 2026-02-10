@@ -1,0 +1,3164 @@
+#!/usr/bin/env python3
+"""
+NmapRST V4.0 - Forensic-First Nmap Result Tracker
+Raw-First • Deterministic • Traceable • Auditable
+
+V4.0 Highlights:
+- Template management system
+- List sorting (8 options)
+- Simplified single-file notes
+- Notes displayed in host summary
+- Improved diff visualization
+- Custom directory configuration
+- Streamlined philosophy
+"""
+
+import subprocess
+import xml.etree.ElementTree as ET
+from pathlib import Path
+import json
+import shutil
+import shlex
+import os
+import ipaddress
+import readline
+import atexit
+from datetime import datetime, timezone
+from collections import Counter, defaultdict
+import difflib
+import pydoc
+import sys
+import uuid
+import hashlib
+import platform
+import getpass
+
+# =========================
+# Version
+# =========================
+VERSION = "4.0.0"
+
+# =========================
+# ANSI colors
+# =========================
+class C:
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[31m"
+    GREEN   = "\033[32m"
+    YELLOW  = "\033[33m"
+    BLUE    = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN    = "\033[36m"
+
+# =========================
+# Service descriptions
+# =========================
+SERVICE_DESCRIPTIONS = {
+    "ssh": "Secure Shell - Remote access protocol",
+    "http": "Hypertext Transfer Protocol - Web server",
+    "https": "HTTP Secure - Encrypted web server",
+    "ftp": "File Transfer Protocol",
+    "ftps": "FTP Secure - Encrypted file transfer",
+    "smtp": "Simple Mail Transfer Protocol - Email",
+    "smtps": "SMTP Secure - Encrypted email",
+    "pop3": "Post Office Protocol v3 - Email retrieval",
+    "pop3s": "POP3 Secure - Encrypted email retrieval",
+    "imap": "Internet Message Access Protocol - Email",
+    "imaps": "IMAP Secure - Encrypted email access",
+    "dns": "Domain Name System",
+    "telnet": "Unencrypted remote access (insecure)",
+    "mysql": "MySQL Database Server",
+    "postgresql": "PostgreSQL Database Server",
+    "mssql": "Microsoft SQL Server",
+    "oracle": "Oracle Database",
+    "redis": "Redis In-Memory Database",
+    "mongodb": "MongoDB NoSQL Database",
+    "elasticsearch": "Elasticsearch Search Engine",
+    "rdp": "Remote Desktop Protocol - Windows remote access",
+    "vnc": "Virtual Network Computing - Remote desktop",
+    "smb": "Server Message Block - Windows file sharing",
+    "netbios-ssn": "NetBIOS Session Service",
+    "ldap": "Lightweight Directory Access Protocol",
+    "ldaps": "LDAP Secure - Encrypted directory access",
+    "nfs": "Network File System",
+    "snmp": "Simple Network Management Protocol",
+    "docker": "Docker Container Service",
+    "kubernetes-api": "Kubernetes API Server",
+}
+
+# =========================
+# Command Aliases
+# =========================
+COMMAND_ALIASES = {
+    # Ultra-common shortcuts
+    'ls': 'list',
+    'l': 'list',
+    
+    # Scan commands
+    'sc': 'scans',
+    's': 'scan',
+    'sd': 'scan',
+    'sr': 'scanraw',
+    'sv': 'scan verify',
+    
+    # Host commands
+    'h': 'host',
+    'hr': 'hostraw',
+    'hd': 'hostdiff',
+    'ht': 'hosttimeline',
+    
+    # Template shortcuts
+    't': 'template',
+    
+    # Other
+    'n': 'note',
+    'st': 'stats',
+    'conf': 'confidence',
+    'phil': 'philosophy',
+    'tut': 'tutorial',
+    'cls': 'clear',
+    
+    # Exit
+    'q': 'quit',
+    '?': 'help',
+}
+
+# =========================
+# Default Scan Templates
+# =========================
+DEFAULT_TEMPLATES = {
+    "quick": {
+        "flags": "-sV -T4 -F",
+        "description": "Fast scan of top 100 ports with version detection",
+        "time": "~30 sec/host",
+        "builtin": True
+    },
+    "full": {
+        "flags": "-sV -p- -T4",
+        "description": "Complete scan of all 65535 TCP ports",
+        "time": "~20 min/host",
+        "builtin": True
+    },
+    "stealth": {
+        "flags": "-sS -sV -T2",
+        "description": "SYN stealth scan (requires root)",
+        "time": "~2 min/host",
+        "builtin": True
+    },
+    "udp": {
+        "flags": "-sU --top-ports 100",
+        "description": "Top 100 UDP ports (requires root)",
+        "time": "~5 min/host",
+        "builtin": True
+    },
+    "vuln": {
+        "flags": "-sV --script vuln",
+        "description": "Vulnerability detection scripts",
+        "time": "~10 min/host",
+        "builtin": True
+    },
+    "discovery": {
+        "flags": "-sn",
+        "description": "Host discovery only (no port scan)",
+        "time": "~1 sec/host",
+        "builtin": True
+    },
+    "aggressive": {
+        "flags": "-A -T4",
+        "description": "OS detection + version + scripts",
+        "time": "~15 min/host",
+        "builtin": True
+    },
+    "web": {
+        "flags": "-p 80,443,8080,8443 -sV --script http-title,http-headers",
+        "description": "Web service focused scan",
+        "time": "~1 min/host",
+        "builtin": True
+    },
+}
+
+# =========================
+# Banner
+# =========================
+def show_banner():
+    banner = f"""
+{C.CYAN}╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   {C.BOLD}███╗   ██╗███╗   ███╗ █████╗ ██████╗ ██████╗ ███████╗████████╗{C.RESET}{C.CYAN}   ║
+║   {C.BOLD}████╗  ██║████╗ ████║██╔══██╗██╔══██╗██╔══██╗██╔════╝╚══██╔══╝{C.RESET}{C.CYAN}   ║
+║   {C.BOLD}██╔██╗ ██║██╔████╔██║███████║██████╔╝██████╔╝███████╗   ██║   {C.RESET}{C.CYAN}   ║
+║   {C.BOLD}██║╚██╗██║██║╚██╔╝██║██╔══██║██╔═══╝ ██╔══██╗╚════██║   ██║   {C.RESET}{C.CYAN}   ║
+║   {C.BOLD}██║ ╚████║██║ ╚═╝ ██║██║  ██║██║     ██║  ██║███████║   ██║   {C.RESET}{C.CYAN}   ║
+║   {C.BOLD}╚═╝  ╚═══╝╚═╝     ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝   {C.RESET}{C.CYAN}   ║
+║                                                               ║
+║        {C.BOLD}Nmap Result Tracker V{VERSION}{C.RESET}{C.CYAN} - Forensic Edition       ║
+║     Raw-First • Deterministic • Traceable • Auditable        ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝{C.RESET}
+
+{C.DIM}Type 'help' for commands • 'tutorial' for guide • 'philosophy' for principles{C.RESET}
+"""
+    print(banner)
+
+# =========================
+# Privilege warning
+# =========================
+if hasattr(os, "geteuid") and os.geteuid() != 0:
+    print(f"{C.YELLOW}[!] Not running as root - some scans may be incomplete{C.RESET}")
+
+# =========================
+# Paths & persistence
+# =========================
+def load_config():
+    """Load configuration with custom paths"""
+    config_file = Path.home() / ".nmaprst" / "config.json"
+    default_base = Path.home() / ".nmaprst"
+    
+    # Ensure base directory exists for config
+    default_base.mkdir(exist_ok=True)
+    
+    if config_file.exists():
+        try:
+            config = json.loads(config_file.read_text())
+            base_dir = Path(config.get("base_dir", default_base))
+        except:
+            base_dir = default_base
+    else:
+        base_dir = default_base
+    
+    return {
+        "base_dir": base_dir,
+        "scans_dir": base_dir / "scans",
+        "notes_dir": base_dir / "notes",
+        "export_dir": base_dir / "exports",
+        "import_dir": base_dir / "imports",
+        "templates_file": base_dir / "templates.json",
+        "index_file": base_dir / "index.json",
+        "history_file": base_dir / ".history",
+        "config_file": base_dir / "config.json",
+    }
+
+def save_config(new_base_dir):
+    """Save configuration with new base directory"""
+    config_file = Path.home() / ".nmaprst" / "config.json"
+    config_file.parent.mkdir(exist_ok=True)
+    
+    config_data = {"base_dir": str(new_base_dir)}
+    config_file.write_text(json.dumps(config_data, indent=2))
+
+config = load_config()
+BASE_DIR   = config["base_dir"]
+SCANS_DIR  = config["scans_dir"]
+NOTES_DIR  = config["notes_dir"]
+EXPORT_DIR = config["export_dir"]
+IMPORT_DIR = config["import_dir"]
+TEMPLATES_FILE = config["templates_file"]
+INDEX_FILE = config["index_file"]
+HISTORY    = config["history_file"]
+CONFIG_FILE = config["config_file"]
+
+SCANS_DIR.mkdir(exist_ok=True)
+NOTES_DIR.mkdir(exist_ok=True)
+EXPORT_DIR.mkdir(exist_ok=True)
+IMPORT_DIR.mkdir(exist_ok=True)
+
+# =========================
+# History
+# =========================
+try:
+    readline.read_history_file(HISTORY)
+except FileNotFoundError:
+    pass
+
+readline.set_history_length(1000)
+atexit.register(lambda: readline.write_history_file(HISTORY))
+
+# =========================
+# Global state
+# =========================
+DRY_RUN = False
+READONLY = os.getenv('NMAPRST_READONLY', '').lower() in ('1', 'true', 'yes')
+LAST_SCAN_ID = None
+LAST_HOST_IP = None
+LAST_VIEWED_HOSTS = []
+
+# =========================
+# Template Manager
+# =========================
+class TemplateManager:
+    """Manage scan templates (built-in + custom)"""
+    
+    @staticmethod
+    def load_templates():
+        """Load templates (merge defaults + custom)"""
+        templates = DEFAULT_TEMPLATES.copy()
+        
+        if TEMPLATES_FILE.exists():
+            try:
+                custom = json.loads(TEMPLATES_FILE.read_text())
+                templates.update(custom)
+            except:
+                pass
+        
+        return templates
+    
+    @staticmethod
+    def save_templates(templates):
+        """Save custom templates (excludes built-ins)"""
+        if DRY_RUN:
+            return
+        
+        custom_only = {
+            name: data 
+            for name, data in templates.items() 
+            if not data.get("builtin", False)
+        }
+        TEMPLATES_FILE.write_text(json.dumps(custom_only, indent=2))
+    
+    @staticmethod
+    def add_template(name, flags, description="", time=""):
+        """Add custom template"""
+        templates = TemplateManager.load_templates()
+        
+        if name in templates and templates[name].get("builtin", False):
+            return False, "Cannot override built-in template"
+        
+        templates[name] = {
+            "flags": flags,
+            "description": description,
+            "time": time,
+            "builtin": False
+        }
+        
+        TemplateManager.save_templates(templates)
+        return True, f"Template '{name}' added"
+    
+    @staticmethod
+    def delete_template(name):
+        """Delete custom template"""
+        templates = TemplateManager.load_templates()
+        
+        if name not in templates:
+            return False, "Template not found"
+        
+        if templates[name].get("builtin", False):
+            return False, "Cannot delete built-in template"
+        
+        del templates[name]
+        TemplateManager.save_templates(templates)
+        return True, f"Template '{name}' deleted"
+    
+    @staticmethod
+    def get_template(name):
+        """Get template by name"""
+        templates = TemplateManager.load_templates()
+        return templates.get(name)
+
+# =========================
+# Helpers
+# =========================
+def now_utc():
+    return datetime.now(timezone.utc).isoformat()
+
+def prompt():
+    prefix = ""
+    if READONLY:
+        prefix = f"{C.YELLOW}[RO] {C.RESET}"
+    elif DRY_RUN:
+        prefix = f"{C.YELLOW}[DRY] {C.RESET}"
+    return f"{prefix}{C.CYAN}{C.BOLD}nmaprst{C.RESET}{C.CYAN}>{C.RESET} "
+
+def sha256_file(filepath):
+    """Compute SHA256 hash of a file"""
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        while chunk := f.read(8192):
+            h.update(chunk)
+    return h.hexdigest()
+
+def get_nmap_version():
+    """Get Nmap version"""
+    try:
+        result = subprocess.run(['nmap', '--version'], 
+                              capture_output=True, text=True, timeout=5)
+        lines = result.stdout.splitlines()
+        if lines:
+            return lines[0].strip()
+    except:
+        pass
+    return "unknown"
+
+def get_scan_context():
+    """Capture scan execution context"""
+    return {
+        "user": getpass.getuser(),
+        "hostname": platform.node(),
+        "cwd": str(Path.cwd()),
+        "nmap_version": get_nmap_version(),
+        "os": f"{platform.system()} {platform.release()}",
+        "python_version": platform.python_version(),
+    }
+
+def validate_targets(args):
+    """Validate IP addresses and CIDR ranges"""
+    valid = []
+    for a in args:
+        try:
+            ipaddress.ip_network(a, strict=False)
+            valid.append(a)
+        except ValueError:
+            if '.' in a or ':' in a:
+                valid.append(a)
+                print(f"{C.YELLOW}[~] Assuming {a} is a hostname{C.RESET}")
+            else:
+                print(f"{C.RED}[✗] Invalid target: {a}{C.RESET}")
+    return valid
+
+def add_unique(lst, value, scan_id):
+    """Add unique values with scan tracking"""
+    if value is None:
+        return
+    if not any(e["value"] == value for e in lst):
+        lst.append({"value": value, "scan": scan_id})
+
+def resolve_field(entries):
+    """Resolve most common value from observations"""
+    if not entries:
+        return None, 0.0
+    counter = Counter(e["value"] for e in entries)
+    value, count = counter.most_common(1)[0]
+    return value, count / float(len(entries))
+
+def format_timestamp(iso_time):
+    """Format ISO timestamp"""
+    try:
+        dt = datetime.fromisoformat(iso_time)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except:
+        return iso_time
+
+def print_separator(char="─", length=80):
+    print(f"{C.DIM}{char * length}{C.RESET}")
+
+def print_header(text):
+    print(f"\n{C.BOLD}{C.BLUE}▶ {text}{C.RESET}")
+    print_separator()
+
+def print_success(text):
+    print(f"{C.GREEN}[✓] {text}{C.RESET}")
+
+def print_error(text):
+    print(f"{C.RED}[✗] {text}{C.RESET}")
+
+def print_warning(text):
+    print(f"{C.YELLOW}[!] {text}{C.RESET}")
+
+def print_info(text):
+    print(f"{C.CYAN}[i] {text}{C.RESET}")
+
+def get_service_description(service_name):
+    """Get human-readable description"""
+    if not service_name:
+        return None
+    return SERVICE_DESCRIPTIONS.get(service_name.lower())
+
+def check_readonly(operation="modify"):
+    """Check if readonly mode is enabled"""
+    if READONLY:
+        print_error(f"Cannot {operation} in READ-ONLY mode")
+        print_info("Unset NMAPRST_READONLY environment variable to enable")
+        return False
+    return True
+
+def resolve_scan_id(ref, index):
+    """Resolve scan reference to actual ID"""
+    global LAST_SCAN_ID
+    
+    if ref == "last" or ref == ".":
+        if not index.data["scans"]:
+            return None
+        scan_id = str(max(int(sid) for sid in index.data["scans"].keys()))
+        LAST_SCAN_ID = scan_id
+        return scan_id
+    
+    elif ref == "prev" or ref == "-1":
+        if len(index.data["scans"]) < 2:
+            return None
+        sorted_ids = sorted(int(sid) for sid in index.data["scans"].keys())
+        scan_id = str(sorted_ids[-2])
+        LAST_SCAN_ID = scan_id
+        return scan_id
+    
+    elif ref.isdigit():
+        LAST_SCAN_ID = ref
+        return ref
+    
+    return None
+
+def resolve_host_ip(ref, last_id_map):
+    """Resolve host reference to IP address"""
+    global LAST_HOST_IP, LAST_VIEWED_HOSTS
+    
+    if ref == "." or ref == "last":
+        return LAST_HOST_IP
+    
+    elif ref == "prev" or ref == "-1":
+        if len(LAST_VIEWED_HOSTS) >= 2:
+            return LAST_VIEWED_HOSTS[-2]
+        return None
+    
+    elif ref.isdigit():
+        ip = last_id_map.get(ref)
+        if ip:
+            track_viewed_host(ip)
+        return ip
+    
+    else:
+        track_viewed_host(ref)
+        return ref
+
+def track_viewed_host(ip):
+    """Track host viewing history"""
+    global LAST_HOST_IP, LAST_VIEWED_HOSTS
+    
+    if not ip:
+        return
+    
+    LAST_HOST_IP = ip
+    
+    if not LAST_VIEWED_HOSTS or LAST_VIEWED_HOSTS[-1] != ip:
+        LAST_VIEWED_HOSTS.append(ip)
+        if len(LAST_VIEWED_HOSTS) > 10:
+            LAST_VIEWED_HOSTS = LAST_VIEWED_HOSTS[-10:]
+
+def get_next_safe_scan_id(index):
+    """Get next available scan ID that won't overwrite files"""
+    base_id = index.data["meta"]["scan_count"] + 1
+    scan_id = base_id
+    
+    max_attempts = 100
+    attempts = 0
+    
+    while attempts < max_attempts:
+        txt_file = SCANS_DIR / f"scan_{scan_id}.txt"
+        xml_file = SCANS_DIR / f"scan_{scan_id}.xml"
+        
+        if not txt_file.exists() and not xml_file.exists():
+            if scan_id > base_id:
+                print_warning(f"Scan #{base_id} files exist - using #{scan_id} instead")
+            return scan_id
+        
+        scan_id += 1
+        attempts += 1
+    
+    print_error(f"Could not find available scan ID after {max_attempts} attempts")
+    return None
+
+def check_scan_suspicious(scan_data, hosts_found):
+    """Detect suspicious scan results (warn only)"""
+    warnings = []
+    
+    if hosts_found == 0:
+        warnings.append("No hosts found - check:")
+        warnings.append("  • Network connectivity")
+        warnings.append("  • Target IP/range")
+        warnings.append("  • Firewall rules")
+        return warnings
+    
+    command = scan_data.get("command", "")
+    
+    if "/" in command:
+        for part in command.split():
+            if "/" not in part:
+                continue
+            
+            try:
+                network = ipaddress.ip_network(part, strict=False)
+                expected = network.num_addresses
+                
+                if network.prefixlen <= 24 and expected > 100:
+                    if hosts_found == 1:
+                        warnings.append(f"Only 1 host on /{network.prefixlen} network")
+                        warnings.append("  • Verify scan range")
+                        warnings.append("  • Check if scan completed")
+                    elif hosts_found < 5:
+                        warnings.append(f"Only {hosts_found} hosts on /{network.prefixlen} network")
+                        warnings.append("  • May be correct, but unusual")
+                
+                elif network.prefixlen <= 16 and hosts_found == 0:
+                    warnings.append(f"No hosts on /{network.prefixlen} - likely wrong network")
+            
+            except ValueError:
+                pass
+    
+    total_ports = sum(
+        len(h.get("ports", {})) 
+        for h in scan_data.get("hosts", {}).values()
+    )
+    
+    if total_ports == 0 and hosts_found > 0:
+        warnings.append(f"{hosts_found} hosts found but NO open ports")
+        warnings.append("  • Hosts may be blocking scans")
+        warnings.append("  • Try different scan type (-sS, -sT)")
+        warnings.append("  • Firewall may be filtering")
+    
+    if hosts_found >= 5:
+        signatures = []
+        for host_data in scan_data.get("hosts", {}).values():
+            ports = tuple(sorted(host_data.get("ports", {}).keys()))
+            signatures.append(ports)
+        
+        if len(set(signatures)) == 1:
+            warnings.append(f"All {hosts_found} hosts have IDENTICAL ports")
+            warnings.append("  • Possible NAT/load balancer")
+            warnings.append("  • Possible proxy")
+            warnings.append("  • May be firewall behavior")
+    
+    return warnings
+
+def sort_hosts(hosts_dict, sort_by="ip-asc"):
+    """Sort hosts by various criteria"""
+    items = list(hosts_dict.items())
+    
+    if sort_by == "ip-asc":
+        return sorted(items, key=lambda x: ipaddress.ip_address(x[0]))
+    elif sort_by == "ip-desc":
+        return sorted(items, key=lambda x: ipaddress.ip_address(x[0]), reverse=True)
+    elif sort_by == "hostname-asc":
+        return sorted(items, key=lambda x: (resolve_field(x[1]["hostname"])[0] or "zzz").lower())
+    elif sort_by == "hostname-desc":
+        return sorted(items, key=lambda x: (resolve_field(x[1]["hostname"])[0] or "").lower(), reverse=True)
+    elif sort_by == "ports-asc":
+        return sorted(items, key=lambda x: len(x[1]["ports"]))
+    elif sort_by == "ports-desc":
+        return sorted(items, key=lambda x: len(x[1]["ports"]), reverse=True)
+    elif sort_by == "scans-asc":
+        return sorted(items, key=lambda x: len(x[1]["seen_in"]))
+    elif sort_by == "scans-desc":
+        return sorted(items, key=lambda x: len(x[1]["seen_in"]), reverse=True)
+    else:
+        return sorted(items)
+
+# =========================
+# Data analysis helpers
+# =========================
+def get_top_services(index, limit=5):
+    """Most common services"""
+    service_counts = Counter()
+    for host in index.data["hosts"].values():
+        for port_data in host["ports"].values():
+            svc, _ = resolve_field(port_data.get("service", []))
+            if svc:
+                service_counts[svc] += 1
+    return service_counts.most_common(limit)
+
+def get_top_products(index, limit=5):
+    """Most common products"""
+    product_counts = Counter()
+    for host in index.data["hosts"].values():
+        for port_data in host["ports"].values():
+            prod, _ = resolve_field(port_data.get("product", []))
+            if prod:
+                product_counts[prod] += 1
+    return product_counts.most_common(limit)
+
+def count_protocol_ports(index):
+    """Count TCP/UDP ports"""
+    tcp_count = 0
+    udp_count = 0
+    for host in index.data["hosts"].values():
+        for port_key in host["ports"].keys():
+            proto, _ = port_key.split("/")
+            if proto == "tcp":
+                tcp_count += 1
+            elif proto == "udp":
+                udp_count += 1
+    return tcp_count, udp_count
+
+def get_hosts_by_port_count(index, limit=5):
+    """Hosts with most open ports"""
+    host_ports = []
+    for ip, host in index.data["hosts"].items():
+        port_count = len(host["ports"])
+        if port_count > 0:
+            host_ports.append((ip, port_count))
+    return sorted(host_ports, key=lambda x: x[1], reverse=True)[:limit]
+
+def find_new_ports_since_scan(host, scan_id):
+    """Find ports first seen in/after a scan"""
+    new_ports = []
+    for port_key, port_data in host["ports"].items():
+        if port_data["first_seen"] >= scan_id:
+            new_ports.append((port_key, port_data))
+    return new_ports
+
+def generate_note_prefill(index, ip):
+    """Generate note prefill using ONLY discovered data"""
+    host = index.data["hosts"].get(ip)
+    if not host:
+        return ""
+    
+    lines = []
+    lines.append(f"Host: {ip}")
+    lines.append("")
+    
+    hostname, hostname_conf = resolve_field(host.get("hostname", []))
+    if hostname:
+        lines.append(f"Hostname: {hostname}")
+        lines.append("")
+    
+    mac, mac_conf = resolve_field(host.get("mac", []))
+    if mac:
+        lines.append(f"MAC: {mac}")
+        lines.append("")
+    
+    if host.get("ports"):
+        lines.append("Open Ports:")
+        for port_key in sorted(host["ports"].keys()):
+            port_data = host["ports"][port_key]
+            service, _ = resolve_field(port_data.get("service", []))
+            state, _ = resolve_field(port_data.get("state", []))
+            
+            if state and state != "open":
+                lines.append(f"- {port_key}  {service or 'unknown'}  ({state})")
+            else:
+                lines.append(f"- {port_key}  {service or 'unknown'}")
+        lines.append("")
+    
+    has_details = False
+    for port_key, port_data in host["ports"].items():
+        product, _ = resolve_field(port_data.get("product", []))
+        version, _ = resolve_field(port_data.get("version", []))
+        if product or version:
+            has_details = True
+            break
+    
+    if has_details:
+        lines.append("Service Details:")
+        for port_key in sorted(host["ports"].keys()):
+            port_data = host["ports"][port_key]
+            service, _ = resolve_field(port_data.get("service", []))
+            product, _ = resolve_field(port_data.get("product", []))
+            version, _ = resolve_field(port_data.get("version", []))
+            
+            if product or version:
+                detail_line = f"- {service or 'unknown'}: "
+                if product:
+                    detail_line += product
+                if version:
+                    detail_line += f" {version}"
+                lines.append(detail_line)
+        lines.append("")
+    
+    scan_count = len(host.get("seen_in", []))
+    if scan_count:
+        lines.append(f"Seen in {scan_count} scan(s)")
+        lines.append("")
+    
+    lines.append("---")
+    lines.append("")
+    
+    return "\n".join(lines)
+
+def get_scan_changes(index, scan_id):
+    """Get hosts with changes in a scan"""
+    changes = []
+    scan_data = index.data["scans"].get(str(scan_id))
+    if not scan_data:
+        return changes
+    
+    for ip in scan_data.get("hosts", {}).keys():
+        host = index.data["hosts"].get(ip)
+        if not host:
+            continue
+        new_ports = find_new_ports_since_scan(host, scan_id)
+        if new_ports:
+            changes.append((ip, len(new_ports)))
+    
+    return sorted(changes, key=lambda x: x[1], reverse=True)
+
+# =========================
+# Diff helpers
+# =========================
+def get_host_ports_in_scan(index, ip, scan_id):
+    """Get all ports for host in scan"""
+    scan_data = index.data["scans"].get(str(scan_id))
+    if not scan_data:
+        return {}
+    host_data = scan_data.get("hosts", {}).get(ip)
+    if not host_data:
+        return {}
+    return host_data.get("ports", {})
+
+def compare_port_data(port_a, port_b):
+    """Compare port data and return differences"""
+    changes = {}
+    if port_a.get("service") != port_b.get("service"):
+        changes["service"] = (port_a.get("service"), port_b.get("service"))
+    if port_a.get("product") != port_b.get("product"):
+        changes["product"] = (port_a.get("product"), port_b.get("product"))
+    if port_a.get("version") != port_b.get("version"):
+        changes["version"] = (port_a.get("version"), port_b.get("version"))
+    return changes
+
+def classify_diff(change_type, old_val, new_val):
+    """Classify diff type with symbol"""
+    if change_type == "service":
+        if old_val is None:
+            return "service_identified", "+"
+        elif new_val is None:
+            return "service_unidentified", "-"
+        else:
+            return "service_changed", "~"
+    elif change_type == "product":
+        if old_val is None:
+            return "product_identified", "+"
+        elif new_val is None:
+            return "product_unidentified", "-"
+        else:
+            return "product_changed", "~"
+    elif change_type == "version":
+        if old_val is None:
+            return "version_identified", "+"
+        elif new_val is None:
+            return "version_unidentified", "-"
+        else:
+            return "version_changed", "~"
+    return "unknown_change", "?"
+
+# =========================
+# Notes system
+# =========================
+class NotesManager:
+    """Manage simple text notes - one file per host"""
+    
+    @staticmethod
+    def get_note_file(ip):
+        """Get note file path for IP"""
+        safe_ip = ip.replace(":", "_").replace(".", "_")
+        return NOTES_DIR / f"note_{safe_ip}.txt"
+    
+    @staticmethod
+    def load_note(ip):
+        """Load note content for host"""
+        note_file = NotesManager.get_note_file(ip)
+        if not note_file.exists():
+            return None
+        try:
+            return note_file.read_text()
+        except:
+            return None
+    
+    @staticmethod
+    def save_note(ip, content):
+        """Save note for host (with attribution header)"""
+        if DRY_RUN:
+            print_info(f"[DRY-RUN] Would save note for {ip}")
+            return
+        
+        note_file = NotesManager.get_note_file(ip)
+        
+        if not content.startswith("---"):
+            header = f"""---
+Host: {ip}
+Author: {getpass.getuser()}@{platform.node()}
+Date: {now_utc()}
+---
+
+"""
+            content = header + content
+        
+        note_file.write_text(content)
+    
+    @staticmethod
+    def has_note(ip):
+        """Check if host has a note"""
+        return NotesManager.get_note_file(ip).exists()
+    
+    @staticmethod
+    def delete_note(ip):
+        """Delete note for host"""
+        if DRY_RUN:
+            print_info(f"[DRY-RUN] Would delete note for {ip}")
+            return True
+        
+        note_file = NotesManager.get_note_file(ip)
+        if note_file.exists():
+            note_file.unlink()
+            return True
+        return False
+
+# =========================
+# Export with manifests
+# =========================
+class Exporter:
+    """Static exports with integrity manifests"""
+    
+    @staticmethod
+    def create_manifest(export_files, index):
+        """Create manifest for export"""
+        manifest = {
+            "created": now_utc(),
+            "nmaprst_version": VERSION,
+            "total_scans": index.data["meta"]["scan_count"],
+            "files": []
+        }
+        
+        for filepath in export_files:
+            if Path(filepath).exists():
+                manifest["files"].append({
+                    "name": Path(filepath).name,
+                    "size": Path(filepath).stat().st_size,
+                    "sha256": sha256_file(filepath)
+                })
+        
+        return manifest
+    
+    @staticmethod
+    def export_host_markdown(index, ip, scan_id=None, print_safe=False):
+        """Export host to Markdown"""
+        host = index.data["hosts"].get(ip)
+        if not host:
+            return None
+        
+        lines = []
+        
+        if print_safe:
+            lines.append("---")
+            lines.append("# NmapRST Host Report")
+            lines.append("---")
+            lines.append("")
+        
+        lines.append(f"# Host Report: {ip}")
+        lines.append(f"\nGenerated: {format_timestamp(now_utc())}")
+        lines.append(f"NmapRST Version: {VERSION}")
+        lines.append("")
+        
+        hn, hn_conf = resolve_field(host["hostname"])
+        mac, mac_conf = resolve_field(host["mac"])
+        
+        lines.append("## Host Information")
+        lines.append("")
+        lines.append(f"- **IP Address:** {ip}")
+        lines.append(f"- **Hostname:** {hn or 'N/A'} (confidence: {hn_conf:.0%})")
+        lines.append(f"- **MAC Address:** {mac or 'N/A'} (confidence: {mac_conf:.0%})")
+        lines.append(f"- **First Seen:** Scan #{host['first_seen']}")
+        lines.append(f"- **Last Seen:** Scan #{host['last_seen']}")
+        lines.append(f"- **Scan Appearances:** {', '.join(f'#{s}' for s in host['seen_in'])}")
+        lines.append("")
+        
+        if print_safe:
+            lines.append("---")
+            lines.append("")
+        
+        lines.append("## Open Ports")
+        lines.append("")
+        
+        if not host["ports"]:
+            lines.append("No open ports detected.")
+        else:
+            lines.append("| Port | Protocol | Service | Product | Version | First Seen | Confidence |")
+            lines.append("|------|----------|---------|---------|---------|------------|------------|")
+            
+            for port_key in sorted(host["ports"].keys()):
+                port_data = host["ports"][port_key]
+                proto, port_num = port_key.split("/")
+                svc, svc_conf = resolve_field(port_data.get("service", []))
+                prod, prod_conf = resolve_field(port_data.get("product", []))
+                ver, ver_conf = resolve_field(port_data.get("version", []))
+                
+                avg_conf = sum(c for c in [svc_conf, prod_conf, ver_conf] if c > 0) / max(1, sum(1 for c in [svc_conf, prod_conf, ver_conf] if c > 0))
+                
+                lines.append(f"| {port_num} | {proto.upper()} | {svc or 'unknown'} | "
+                           f"{prod or 'N/A'} | {ver or 'N/A'} | Scan #{port_data['first_seen']} | {avg_conf:.0%} |")
+        
+        lines.append("")
+        
+        if print_safe:
+            lines.append("---")
+            lines.append("")
+        
+        note = NotesManager.load_note(ip)
+        if note:
+            lines.append("## Notes")
+            lines.append("")
+            lines.append("```")
+            lines.append(note)
+            lines.append("```")
+            lines.append("")
+            
+            if print_safe:
+                lines.append("---")
+                lines.append("")
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def export_map_text(index, mode="default"):
+        """Export map as text"""
+        lines = []
+        lines.append("=" * 80)
+        lines.append("NMAPRST NETWORK MAP")
+        lines.append("=" * 80)
+        lines.append(f"Generated: {format_timestamp(now_utc())}")
+        lines.append(f"NmapRST Version: {VERSION}")
+        lines.append(f"Total Hosts: {len(index.data['hosts'])}")
+        lines.append(f"Total Scans: {index.data['meta']['scan_count']}")
+        lines.append("")
+        
+        if mode == "compact":
+            service_map = defaultdict(list)
+            for ip, host in sorted(index.data["hosts"].items()):
+                for port_key, port_data in host["ports"].items():
+                    svc, _ = resolve_field(port_data.get("service", []))
+                    if svc:
+                        service_map[svc].append((ip, port_key))
+            
+            lines.append("SERVICE-CENTRIC VIEW")
+            lines.append("-" * 80)
+            
+            for service in sorted(service_map.keys()):
+                hosts = service_map[service]
+                lines.append(f"\n{service.upper()} ({len(hosts)} instances)")
+                for ip, port_key in sorted(set((ip, pk) for ip, pk in hosts)):
+                    lines.append(f"  • {ip:<20} {port_key}")
+        
+        else:
+            lines.append("HOST-CENTRIC VIEW")
+            lines.append("-" * 80)
+            
+            for ip, host in sorted(index.data["hosts"].items()):
+                hn, _ = resolve_field(host["hostname"])
+                name = f" ({hn})" if hn else ""
+                lines.append(f"\n{ip}{name}")
+                lines.append(f"  First seen: Scan #{host['first_seen']}, Last seen: Scan #{host['last_seen']}")
+                
+                if host["ports"]:
+                    lines.append("  Open Ports:")
+                    for port_key in sorted(host["ports"].keys()):
+                        port_data = host["ports"][port_key]
+                        svc, _ = resolve_field(port_data.get("service", []))
+                        prod, _ = resolve_field(port_data.get("product", []))
+                        ver, _ = resolve_field(port_data.get("version", []))
+                        
+                        details = []
+                        if prod:
+                            details.append(prod)
+                        if ver:
+                            details.append(ver)
+                        
+                        detail_str = " - " + " ".join(details) if details else ""
+                        lines.append(f"    • {port_key:<12} {svc or 'unknown'}{detail_str}")
+                else:
+                    lines.append("  No open ports")
+        
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append("Note: This is a deterministic snapshot. No topology inference.")
+        lines.append("=" * 80)
+        return "\n".join(lines)
+
+# =========================
+# Inventory objects
+# =========================
+class Port:
+    def __init__(self, proto, portid, scan_id):
+        self.protocol = proto
+        self.port = portid
+        self.service = []
+        self.product = []
+        self.version = []
+        self.observations = [scan_id]
+        self.first_seen = scan_id
+        self.last_seen = scan_id
+
+    def observe(self, service, product, version, scan_id):
+        self.last_seen = scan_id
+        if scan_id not in self.observations:
+            self.observations.append(scan_id)
+        add_unique(self.service, service, scan_id)
+        add_unique(self.product, product, scan_id)
+        add_unique(self.version, version, scan_id)
+
+    def to_dict(self):
+        return self.__dict__
+
+class Host:
+    def __init__(self, ip, scan_id):
+        self.ip = ip
+        self.hostname = []
+        self.mac = []
+        self.ports = {}
+        self.first_seen = scan_id
+        self.last_seen = scan_id
+        self.seen_in = [scan_id]
+
+    def add_hostname(self, name, scan_id):
+        add_unique(self.hostname, name, scan_id)
+
+    def add_mac(self, mac, scan_id):
+        add_unique(self.mac, mac, scan_id)
+
+    def get_port(self, proto, portid, scan_id):
+        key = f"{proto}/{portid}"
+        if key not in self.ports:
+            self.ports[key] = Port(proto, portid, scan_id)
+        return self.ports[key]
+
+    def to_dict(self):
+        return {
+            "ip": self.ip,
+            "hostname": self.hostname,
+            "mac": self.mac,
+            "ports": {k: v.to_dict() for k, v in self.ports.items()},
+            "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
+            "seen_in": self.seen_in,
+        }
+
+# =========================
+# Index handling
+# =========================
+class Index:
+    def __init__(self):
+        self.data = self.load()
+
+    def load(self):
+        if INDEX_FILE.exists():
+            try:
+                data = json.loads(INDEX_FILE.read_text())
+            except Exception as e:
+                backup = INDEX_FILE.with_suffix(".bak")
+                shutil.copy(INDEX_FILE, backup)
+                print_error(f"Corrupt index backed up to {backup}")
+                print_error(f"Error: {e}")
+                data = {}
+        else:
+            data = {}
+
+        data.setdefault("meta", {
+            "created": now_utc(),
+            "scan_count": 0,
+            "version": VERSION
+        })
+        data.setdefault("hosts", {})
+        data.setdefault("scans", {})
+        return data
+
+    def save(self):
+        if DRY_RUN:
+            print_info("[DRY-RUN] Would save index")
+            return
+        tmp = INDEX_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data, indent=2))
+        tmp.replace(INDEX_FILE)
+
+    def reset(self):
+        self.data = {
+            "meta": {
+                "created": now_utc(),
+                "scan_count": 0,
+                "version": VERSION
+            },
+            "hosts": {},
+            "scans": {},
+        }
+        self.save()
+
+# =========================
+# XML parsing
+# =========================
+def parse_scan(xml_file, scan_id, index):
+    """Parse Nmap XML"""
+    if not xml_file.exists():
+        print_error(f"XML not found: {xml_file}")
+        return
+
+    try:
+        for _, h in ET.iterparse(xml_file, events=("end",)):
+            if h.tag != "host":
+                continue
+
+            status = h.find("status")
+            if status is None or status.attrib.get("state") != "up":
+                h.clear()
+                continue
+
+            ip = mac = None
+            for addr in h.findall("address"):
+                if addr.attrib.get("addrtype") in ("ipv4", "ipv6"):
+                    ip = addr.attrib.get("addr")
+                elif addr.attrib.get("addrtype") == "mac":
+                    mac = addr.attrib.get("addr")
+
+            if not ip:
+                h.clear()
+                continue
+
+            old = index.data["hosts"].get(ip)
+            if old:
+                host = Host(ip, old["first_seen"])
+                host.__dict__.update(old)
+                host.ports = {}
+                for k, v in old["ports"].items():
+                    port = Port(v["protocol"], v["port"], v["first_seen"])
+                    port.__dict__.update(v)
+                    host.ports[k] = port
+            else:
+                host = Host(ip, scan_id)
+
+            host.last_seen = scan_id
+            if scan_id not in host.seen_in:
+                host.seen_in.append(scan_id)
+
+            for hn in h.findall("hostnames/hostname"):
+                name = hn.attrib.get("name")
+                if name:
+                    host.add_hostname(name, scan_id)
+
+            if mac:
+                host.add_mac(mac, scan_id)
+
+            raw_ports = {}
+            for p in h.findall("ports/port"):
+                state = p.find("state")
+                if state is None or state.attrib.get("state") != "open":
+                    continue
+
+                proto = p.attrib.get("protocol")
+                portid = p.attrib.get("portid")
+                svc = p.find("service")
+
+                service = svc.attrib.get("name") if svc is not None else None
+                product = svc.attrib.get("product") if svc is not None else None
+                version = svc.attrib.get("version") if svc is not None else None
+
+                port = host.get_port(proto, portid, scan_id)
+                port.observe(service, product, version, scan_id)
+
+                raw_ports[f"{proto}/{portid}"] = {
+                    "service": service,
+                    "product": product,
+                    "version": version,
+                }
+
+            index.data["hosts"][ip] = host.to_dict()
+            if str(scan_id) not in index.data["scans"]:
+                index.data["scans"][str(scan_id)] = {"hosts": {}}
+            index.data["scans"][str(scan_id)]["hosts"][ip] = {"ports": raw_ports}
+            h.clear()
+
+        index.save()
+    except Exception as e:
+        print_error(f"Parse error: {e}")
+        raise
+
+# =========================
+# Raw stdout extraction
+# =========================
+def extract_host_block(scan_txt: Path, ip: str):
+    """Extract raw Nmap output for host"""
+    if not scan_txt.exists():
+        return None
+
+    text = scan_txt.read_text(errors="replace")
+    marker = "Nmap scan report for "
+    blocks = text.split(marker)
+
+    for block in blocks[1:]:
+        lines = block.splitlines()
+        if not lines:
+            continue
+        header = lines[0]
+        if f"({ip})" in header or header.strip().endswith(ip) or header.startswith(ip):
+            return marker + block.rstrip()
+    return None
+
+# =========================
+# Display helpers
+# =========================
+def show_host_summary(ip, host, index, previous_scan_id=None):
+    """Display host details"""
+    print_header(f"Host Summary: {ip}")
+    
+    hn, hn_conf = resolve_field(host["hostname"])
+    mac, mac_conf = resolve_field(host["mac"])
+
+    print(f"{C.BOLD}IP Address:{C.RESET}  {C.GREEN}{ip}{C.RESET}")
+    print(f"{C.BOLD}Hostname:{C.RESET}    {hn or C.DIM + '(none)' + C.RESET} {f'({hn_conf:.0%} confidence)' if hn else ''}")
+    print(f"{C.BOLD}MAC Address:{C.RESET} {mac or C.DIM + '(none)' + C.RESET} {f'({mac_conf:.0%} confidence)' if mac else ''}")
+    
+    print(f"\n{C.BOLD}Discovery Timeline:{C.RESET}")
+    print(f"  First seen:  scan #{host['first_seen']}")
+    print(f"  Last seen:   scan #{host['last_seen']}")
+    print(f"  Appearances: {len(host['seen_in'])} scan(s) - {', '.join(f'#{s}' for s in host['seen_in'])}")
+
+    # Display note if exists
+    note = NotesManager.load_note(ip)
+    if note:
+        print(f"\n{C.BOLD}Notes:{C.RESET}")
+        print(f"{C.DIM}{'─' * 60}{C.RESET}")
+        note_lines = note.split("\n")
+        preview_lines = note_lines[:5]
+        for line in preview_lines:
+            print(f"{C.CYAN}{line}{C.RESET}")
+        if len(note_lines) > 5:
+            print(f"{C.DIM}... ({len(note_lines) - 5} more lines){C.RESET}")
+        print(f"{C.DIM}{'─' * 60}{C.RESET}")
+        print(f"{C.DIM}Use 'note . show' to view full note{C.RESET}")
+
+    service_summary = Counter()
+    product_summary = Counter()
+    
+    for port_data in host["ports"].values():
+        svc, _ = resolve_field(port_data.get("service", []))
+        prod, _ = resolve_field(port_data.get("product", []))
+        if svc:
+            service_summary[svc] += 1
+        if prod:
+            product_summary[prod] += 1
+    
+    if service_summary or product_summary:
+        print(f"\n{C.BOLD}Summary:{C.RESET}")
+        if service_summary:
+            top_services = service_summary.most_common(3)
+            svc_list = ", ".join(f"{svc} ({count})" for svc, count in top_services)
+            print(f"  Top services: {svc_list}")
+        if product_summary:
+            top_products = product_summary.most_common(3)
+            prod_list = ", ".join(f"{prod} ({count})" for prod, count in top_products)
+            print(f"  Top products: {prod_list}")
+
+    if previous_scan_id:
+        new_ports = find_new_ports_since_scan(host, previous_scan_id)
+        if new_ports:
+            print(f"\n{C.GREEN}[NEW]{C.RESET} {len(new_ports)} port(s) since scan #{previous_scan_id - 1}")
+
+    print_header("Open Ports")
+    if not host["ports"]:
+        print(f"{C.DIM}  No open ports{C.RESET}")
+        return
+
+    tcp_ports = []
+    udp_ports = []
+    
+    for key, p in host["ports"].items():
+        svc, svc_conf = resolve_field(p["service"])
+        prod, prod_conf = resolve_field(p["product"])
+        ver, ver_conf = resolve_field(p["version"])
+
+        port_info = {
+            "key": key,
+            "port": p,
+            "service": svc,
+            "service_conf": svc_conf,
+            "product": prod,
+            "version": ver,
+        }
+        
+        if p["protocol"] == "tcp":
+            tcp_ports.append(port_info)
+        else:
+            udp_ports.append(port_info)
+
+    if tcp_ports:
+        print(f"\n{C.CYAN}TCP Ports:{C.RESET}")
+        print(f"  {'PORT':<7} {'SERVICE':<15} {'CONF%':<6} {'PRODUCT':<25} {'VERSION':<15} {'NEW'}")
+        print(f"  {C.DIM}{'-' * 92}{C.RESET}")
+        
+        for port_info in sorted(tcp_ports, key=lambda x: int(x['port']['port'])):
+            port_num = port_info['port']['port']
+            svc = port_info['service'] or C.DIM + 'unknown' + C.RESET
+            svc_conf = f"{port_info['service_conf']:.0%}" if port_info['service'] else "--"
+            prod = port_info['product'] or ''
+            ver = port_info['version'] or ''
+            
+            if len(prod) > 25:
+                prod = prod[:22] + "..."
+            
+            is_new = port_info['port']['first_seen'] == host['last_seen']
+            new_marker = f"{C.GREEN}●{C.RESET}" if is_new else " "
+            
+            print(f"  {port_num:<7} {svc:<15} {svc_conf:<6} {prod:<25} {ver:<15} {new_marker}")
+
+    if udp_ports:
+        print(f"\n{C.CYAN}UDP Ports:{C.RESET}")
+        print(f"  {'PORT':<7} {'SERVICE':<15} {'CONF%':<6} {'PRODUCT':<25} {'VERSION':<15} {'NEW'}")
+        print(f"  {C.DIM}{'-' * 92}{C.RESET}")
+        
+        for port_info in sorted(udp_ports, key=lambda x: int(x['port']['port'])):
+            port_num = port_info['port']['port']
+            svc = port_info['service'] or C.DIM + 'unknown' + C.RESET
+            svc_conf = f"{port_info['service_conf']:.0%}" if port_info['service'] else "--"
+            prod = port_info['product'] or ''
+            ver = port_info['version'] or ''
+            
+            if len(prod) > 25:
+                prod = prod[:22] + "..."
+            
+            is_new = port_info['port']['first_seen'] == host['last_seen']
+            new_marker = f"{C.GREEN}●{C.RESET}" if is_new else " "
+            
+            print(f"  {port_num:<7} {svc:<15} {svc_conf:<6} {prod:<25} {ver:<15} {new_marker}")
+
+    print()
+
+def show_host_diff(index, ip, scan_a, scan_b, classified=False):
+    """Show diff between scans"""
+    print_header(f"Host Diff: {ip} (Scan #{scan_a} → Scan #{scan_b})")
+    
+    ports_a = get_host_ports_in_scan(index, ip, scan_a)
+    ports_b = get_host_ports_in_scan(index, ip, scan_b)
+    
+    if not ports_a and not ports_b:
+        print_warning("No data in specified scans")
+        return
+    
+    keys_a = set(ports_a.keys())
+    keys_b = set(ports_b.keys())
+    
+    added = keys_b - keys_a
+    removed = keys_a - keys_b
+    common = keys_a & keys_b
+    
+    if removed:
+        print(f"\n{C.RED}[REMOVED]{C.RESET} {len(removed)} port(s) closed:")
+        for port_key in sorted(removed):
+            port_data = ports_a[port_key]
+            svc = port_data.get("service") or "unknown"
+            prod = port_data.get("product") or ""
+            ver = port_data.get("version") or ""
+            details = f"{prod} {ver}".strip() or svc
+            print(f"  {C.RED}−{C.RESET} {port_key:<10} {details}")
+    
+    if added:
+        print(f"\n{C.GREEN}[ADDED]{C.RESET} {len(added)} new port(s):")
+        for port_key in sorted(added):
+            port_data = ports_b[port_key]
+            svc = port_data.get("service") or "unknown"
+            prod = port_data.get("product") or ""
+            ver = port_data.get("version") or ""
+            details = f"{prod} {ver}".strip() or svc
+            print(f"  {C.GREEN}+{C.RESET} {port_key:<10} {details}")
+    
+    changes_found = False
+    for port_key in sorted(common):
+        port_changes = compare_port_data(ports_a[port_key], ports_b[port_key])
+        if port_changes:
+            if not changes_found:
+                print(f"\n{C.YELLOW}[CHANGED]{C.RESET} Service/version updates:")
+                changes_found = True
+            
+            print(f"  {C.YELLOW}~{C.RESET} {port_key}")
+            for field, (old, new) in port_changes.items():
+                old_val = old or "(none)"
+                new_val = new or "(none)"
+                
+                if classified:
+                    change_class, symbol = classify_diff(field, old, new)
+                    color = C.GREEN if symbol == "+" else C.YELLOW if symbol == "~" else C.RED
+                    print(f"    {color}{symbol}{C.RESET} {field}: {C.DIM}{old_val}{C.RESET} → {C.BOLD}{new_val}{C.RESET} [{change_class}]")
+                else:
+                    print(f"    {field}: {C.DIM}{old_val}{C.RESET} → {C.BOLD}{new_val}{C.RESET}")
+    
+    if not added and not removed and not changes_found:
+        print(f"\n{C.GREEN}✓{C.RESET} No changes detected")
+    else:
+        print(f"\n{C.BOLD}Summary:{C.RESET} {C.GREEN}+{len(added)}{C.RESET} added, "
+              f"{C.RED}−{len(removed)}{C.RESET} removed, "
+              f"{C.YELLOW}~{sum(1 for pk in common if compare_port_data(ports_a[pk], ports_b[pk]))}{C.RESET} changed")
+    
+    print()
+
+def show_host_timeline(index, ip):
+    """Show ASCII timeline"""
+    print_header(f"Host Timeline: {ip}")
+    
+    host = index.data["hosts"].get(ip)
+    if not host:
+        print_error(f"Host {ip} not found")
+        return
+    
+    host_scans = sorted(host["seen_in"])
+    
+    if not host_scans:
+        print_info("No scan data for this host")
+        return
+    
+    if len(host_scans) == 1:
+        print_info("Timeline requires at least 2 scans to compare")
+        print_info(f"This host was seen in scan #{host_scans[0]}")
+        return
+    
+    all_ports = set()
+    for scan_id in host_scans:
+        ports = get_host_ports_in_scan(index, ip, scan_id)
+        all_ports.update(ports.keys())
+    
+    if not all_ports:
+        print_warning("No ports found in any scan")
+        return
+    
+    print(f"\n{C.BOLD}Port presence across scans:{C.RESET}")
+    print(f"Legend: {C.GREEN}●{C.RESET} present  {C.DIM}○{C.RESET} absent  {C.YELLOW}~{C.RESET} changed")
+    print()
+    
+    scan_headers = [f"#{sid}" for sid in host_scans]
+    header_line = f"  {'PORT':<12} | " + " ".join(f"{h:>4}" for h in scan_headers) + " | SERVICE"
+    print(header_line)
+    print(f"  {C.DIM}{'-' * len(header_line)}{C.RESET}")
+    
+    for port_key in sorted(all_ports):
+        row = f"  {port_key:<12} | "
+        
+        prev_service = None
+        for scan_id in host_scans:
+            ports = get_host_ports_in_scan(index, ip, scan_id)
+            if port_key in ports:
+                current_service = ports[port_key].get("service")
+                if prev_service is not None and prev_service != current_service:
+                    row += f"{C.YELLOW}  ~ {C.RESET}"
+                else:
+                    row += f"{C.GREEN}  ● {C.RESET}"
+                prev_service = current_service
+            else:
+                row += f"{C.DIM}  ○ {C.RESET}"
+        
+        last_ports = get_host_ports_in_scan(index, ip, host_scans[-1])
+        if port_key in last_ports:
+            svc = last_ports[port_key].get("service") or "unknown"
+            row += f"| {svc}"
+        
+        print(row)
+    
+    print()
+
+def show_scan_details(scan_id, scan_data, index):
+    """Display scan details"""
+    print_header(f"Scan #{scan_id} Details")
+    
+    print(f"{C.BOLD}Timestamp:{C.RESET}  {format_timestamp(scan_data.get('time', 'N/A'))}")
+    print(f"{C.BOLD}Command:{C.RESET}    {scan_data.get('command', 'N/A')}")
+    
+    if "context" in scan_data:
+        ctx = scan_data["context"]
+        print(f"\n{C.BOLD}Scan Context:{C.RESET}")
+        print(f"  User:         {ctx.get('user', 'unknown')}@{ctx.get('hostname', 'unknown')}")
+        print(f"  Working dir:  {ctx.get('cwd', 'unknown')}")
+        print(f"  Nmap version: {ctx.get('nmap_version', 'unknown')}")
+        print(f"  OS:           {ctx.get('os', 'unknown')}")
+    
+    if "hashes" in scan_data:
+        hashes = scan_data["hashes"]
+        print(f"\n{C.BOLD}Integrity:{C.RESET}")
+        print(f"  TXT SHA256:   {hashes.get('txt', 'N/A')[:16]}...")
+        print(f"  XML SHA256:   {hashes.get('xml', 'N/A')[:16]}...")
+    
+    hosts = scan_data.get('hosts', {})
+    print(f"\n{C.BOLD}Results:{C.RESET}")
+    print(f"  Hosts:        {len(hosts)} discovered")
+    
+    total_ports = 0
+    tcp_ports = 0
+    udp_ports = 0
+    service_counts = Counter()
+    
+    for ip, host_data in hosts.items():
+        ports = host_data.get('ports', {})
+        total_ports += len(ports)
+        
+        for port_key, port_data in ports.items():
+            proto, _ = port_key.split("/")
+            if proto == "tcp":
+                tcp_ports += 1
+            elif proto == "udp":
+                udp_ports += 1
+            
+            svc = port_data.get("service")
+            if svc:
+                service_counts[svc] += 1
+    
+    print(f"  Ports:        {total_ports} total ({tcp_ports} TCP, {udp_ports} UDP)")
+    
+    if service_counts:
+        top_5 = service_counts.most_common(5)
+        print(f"\n{C.BOLD}Top Services:{C.RESET}")
+        for svc, count in top_5:
+            print(f"  • {svc:<15} ({count} instances)")
+    
+    changes = get_scan_changes(index, int(scan_id))
+    if changes and int(scan_id) > 1:
+        print(f"\n{C.BOLD}Hosts with New Ports:{C.RESET}")
+        for ip, new_count in changes[:5]:
+            print(f"  • {ip:<15} (+{new_count} ports)")
+    
+    if hosts:
+        print(f"\n{C.CYAN}Discovered Hosts:{C.RESET}")
+        for ip, data in sorted(hosts.items()):
+            port_count = len(data.get('ports', {}))
+            hostname_data = index.data["hosts"].get(ip, {})
+            hn, _ = resolve_field(hostname_data.get("hostname", []))
+            name_display = f" ({hn})" if hn else ""
+            print(f"  • {ip:<15}{name_display:<20} {port_count} open ports")
+    print()
+
+def show_scan_raw(index, scan_id):
+    """Show raw scan output"""
+    print_header(f"Scan #{scan_id} - Raw Output")
+    
+    scan_data = index.data["scans"].get(str(scan_id))
+    if not scan_data:
+        print_error(f"Scan #{scan_id} not found")
+        return
+    
+    txt_file = SCANS_DIR / f"scan_{scan_id}.txt"
+    if not txt_file.exists():
+        print_error(f"Raw file not found: {txt_file}")
+        return
+    
+    output = []
+    output.append(f"{C.BOLD}{C.CYAN}{'=' * 64}")
+    output.append(f"SCAN #{scan_id}")
+    output.append(f"Time: {format_timestamp(scan_data.get('time', 'N/A'))}")
+    output.append(f"Command: {scan_data.get('command', 'N/A')}")
+    output.append(f"{'=' * 64}{C.RESET}\n")
+    
+    raw_text = txt_file.read_text(errors="replace")
+    output.append(raw_text)
+    
+    pydoc.pager("\n".join(output))
+
+def show_map(index, mode="default", filter_ip=None):
+    """Show network map - NO topology inference"""
+    print_header("Network Map")
+    
+    if filter_ip:
+        if filter_ip not in index.data["hosts"]:
+            print_error(f"Host {filter_ip} not found")
+            return
+        
+        host = index.data["hosts"][filter_ip]
+        hn, _ = resolve_field(host["hostname"])
+        name = f" ({hn})" if hn else ""
+        
+        print(f"\n{C.BOLD}Host:{C.RESET} {filter_ip}{name}")
+        print(f"Scans: {', '.join(f'#{s}' for s in host['seen_in'])}")
+        
+        if host["ports"]:
+            print(f"\n{C.BOLD}Open Ports:{C.RESET}")
+            for port_key in sorted(host["ports"].keys()):
+                port_data = host["ports"][port_key]
+                svc, _ = resolve_field(port_data.get("service", []))
+                prod, _ = resolve_field(port_data.get("product", []))
+                print(f"  • {port_key:<12} {svc or 'unknown':<15} {prod or ''}")
+        else:
+            print("No open ports")
+    
+    elif mode == "compact":
+        service_map = defaultdict(list)
+        for ip, host in sorted(index.data["hosts"].items()):
+            for port_key, port_data in host["ports"].items():
+                svc, _ = resolve_field(port_data.get("service", []))
+                if svc:
+                    service_map[svc].append((ip, port_key))
+        
+        print(f"\n{C.BOLD}Service-Centric View{C.RESET}")
+        print(f"Total services: {len(service_map)}")
+        print()
+        
+        for service in sorted(service_map.keys()):
+            hosts = service_map[service]
+            print(f"{C.CYAN}{service.upper()}{C.RESET} ({len(hosts)} instances)")
+            for ip, port_key in sorted(set((ip, pk) for ip, pk in hosts)):
+                hn, _ = resolve_field(index.data["hosts"][ip].get("hostname", []))
+                name = f" ({hn})" if hn else ""
+                print(f"  • {ip:<20}{name:<20} {port_key}")
+            print()
+    
+    else:
+        hosts = index.data["hosts"]
+        print(f"\n{C.BOLD}Total Hosts:{C.RESET} {len(hosts)}")
+        print()
+        
+        for ip, host in sorted(hosts.items()):
+            hn, _ = resolve_field(host["hostname"])
+            name = f" ({hn})" if hn else ""
+            print(f"{C.GREEN}{ip}{C.RESET}{name}")
+            print(f"  Scans: {', '.join(f'#{s}' for s in host['seen_in'])}")
+            
+            if host["ports"]:
+                print(f"  Ports:")
+                for port_key in sorted(host["ports"].keys()):
+                    port_data = host["ports"][port_key]
+                    svc, _ = resolve_field(port_data.get("service", []))
+                    prod, _ = resolve_field(port_data.get("product", []))
+                    ver, _ = resolve_field(port_data.get("version", []))
+                    
+                    details = []
+                    if prod:
+                        details.append(prod)
+                    if ver:
+                        details.append(ver)
+                    
+                    detail_str = " - " + " ".join(details) if details else ""
+                    print(f"    • {port_key:<12} {svc or 'unknown'}{detail_str}")
+            else:
+                print(f"  {C.DIM}No open ports{C.RESET}")
+            print()
+
+# =========================
+# Search
+# =========================
+def search_hosts(index, term, search_notes=False):
+    """Enhanced search"""
+    results = []
+    term_lower = term.lower()
+    is_port = term.isdigit()
+    
+    for ip, host in index.data["hosts"].items():
+        matches = []
+        
+        if term_lower in ip.lower():
+            matches.append(("IP", ip))
+        
+        for hn_entry in host.get("hostname", []):
+            if hn_entry["value"] and term_lower in hn_entry["value"].lower():
+                matches.append(("Hostname", hn_entry["value"]))
+                break
+        
+        for port_key, port_data in host.get("ports", {}).items():
+            if is_port:
+                _, port_num = port_key.split("/")
+                if port_num == term:
+                    svc, _ = resolve_field(port_data.get("service", []))
+                    matches.append(("Port", f"{port_key} ({svc or 'unknown'})"))
+                    break
+            
+            for svc_entry in port_data.get("service", []):
+                if svc_entry["value"] and term_lower in svc_entry["value"].lower():
+                    matches.append(("Service", f"{port_key} - {svc_entry['value']}"))
+                    break
+            
+            for prod_entry in port_data.get("product", []):
+                if prod_entry["value"] and term_lower in prod_entry["value"].lower():
+                    matches.append(("Product", f"{port_key} - {prod_entry['value']}"))
+                    break
+            
+            for ver_entry in port_data.get("version", []):
+                if ver_entry["value"] and term_lower in ver_entry["value"].lower():
+                    matches.append(("Version", f"{port_key} - {ver_entry['value']}"))
+                    break
+        
+        if search_notes:
+            note = NotesManager.load_note(ip)
+            if note and term_lower in note.lower():
+                preview = note[:50] + "..." if len(note) > 50 else note
+                matches.append(("Note", preview))
+        
+        if matches:
+            results.append({
+                "ip": ip,
+                "matches": matches,
+                "first_seen": host["first_seen"],
+                "last_seen": host["last_seen"],
+            })
+    
+    return results
+
+# =========================
+# Philosophy
+# =========================
+def show_philosophy():
+    """Streamlined philosophy statement"""
+    text = f"""
+{C.BOLD}{C.CYAN}{'=' * 80}
+NMAPRST PHILOSOPHY
+{'=' * 80}{C.RESET}
+
+{C.BOLD}What NmapRST Does:{C.RESET}
+
+  {C.GREEN}✓{C.RESET} Records what Nmap reports
+  {C.GREEN}✓{C.RESET} Preserves raw scan output
+  {C.GREEN}✓{C.RESET} Tracks changes over time
+  {C.GREEN}✓{C.RESET} Maintains data integrity (SHA256)
+  {C.GREEN}✓{C.RESET} Provides full audit trail
+
+{C.BOLD}What NmapRST Will Never Do:{C.RESET}
+
+  {C.RED}✗{C.RESET} Interpret results
+  {C.RED}✗{C.RESET} Score vulnerabilities
+  {C.RED}✗{C.RESET} Predict topology
+  {C.RED}✗{C.RESET} Recommend actions
+  {C.RED}✗{C.RESET} Make security judgments
+  {C.RED}✗{C.RESET} Send data externally
+
+{C.BOLD}Core Principle:{C.RESET}
+
+  Data tools that interpret results give false confidence and hide
+  important details. NmapRST is a forensic recorder, not an analyst.
+  
+  You are the analyst. NmapRST gives you the data and provenance.
+  You decide what it means.
+
+{C.BOLD}Confidence Percentage Explained:{C.RESET}
+
+  Confidence = consistency across scans, NOT accuracy.
+  
+  • 100% = Always seen (stable)
+  •  50% = Seen half the time (variable)
+  •  33% = Seen once (new/rare)
+  
+  Formula: (times_seen / total_scans) × 100
+  
+  Low confidence indicates variability (firewall behavior, load
+  balancing, timing), not incorrectness. The data is factual—
+  Nmap reported different things at different times.
+
+{C.BOLD}Key Limitations:{C.RESET}
+
+  • Firewalls can lie
+  • Services change during scans
+  • UDP scans are inherently unreliable
+  • Version detection is heuristic
+  • Privileged scans see more than unprivileged
+
+{C.DIM}NmapRST is forensically defensible, audit-ready, and deterministic.
+It will never pretend to know more than what Nmap actually reported.{C.RESET}
+"""
+    pydoc.pager(text)
+
+def show_confidence_explain():
+    """Detailed confidence explanation"""
+    text = f"""
+{C.BOLD}{C.CYAN}{'=' * 80}
+CONFIDENCE PERCENTAGE EXPLAINED
+{'=' * 80}{C.RESET}
+
+{C.BOLD}What Confidence Means:{C.RESET}
+
+Confidence measures {C.BOLD}consistency{C.RESET}, not accuracy. It tells you how often
+NmapRST has observed a particular value across multiple scans.
+
+{C.BOLD}Formula:{C.RESET}
+  
+  Confidence = (Number of times observed / Total scans of this host) × 100
+
+{C.BOLD}Examples:{C.RESET}
+
+  Host scanned 5 times:
+  • Service "ssh" seen 5 times    → 100% confidence (always consistent)
+  • Service "http" seen 3 times   →  60% confidence (sometimes)
+  • Version "2.0" seen 1 time     →  20% confidence (rare observation)
+
+{C.BOLD}What High Confidence Means:{C.RESET}
+
+  {C.GREEN}100%{C.RESET} = Nmap has always reported this value
+        • Very stable
+        • Service likely always running
+        • Highly repeatable observation
+
+  {C.YELLOW}50-99%{C.RESET} = Nmap sometimes reports this value
+          • May be load-balanced
+          • Could be firewall behavior
+          • Service may restart with different config
+          • Scan timing may affect results
+
+  {C.RED}1-49%{C.RESET} = Nmap rarely reports this value
+        • New observation
+        • Transient service
+        • Scan-specific condition
+
+{C.BOLD}What Confidence Does NOT Mean:{C.RESET}
+
+  {C.RED}✗{C.RESET} Confidence is NOT accuracy
+  {C.RED}✗{C.RESET} Low confidence does NOT mean "wrong"
+  {C.RED}✗{C.RESET} High confidence does NOT guarantee correctness
+  
+  If Nmap reported it, it happened. Confidence just tells you
+  how often it happened.
+
+{C.BOLD}Why Values Vary:{C.RESET}
+
+  • Load balancers rotating backend servers
+  • Firewalls with inconsistent rules
+  • Services that start/stop
+  • Different scan types revealing different info
+  • Network timing and packet loss
+  • Service banner rotation
+
+{C.BOLD}How to Use Confidence:{C.RESET}
+
+  • High confidence → stable baseline for monitoring
+  • Low confidence → investigate why it varies
+  • Sudden drop → something changed recently
+  
+  Use confidence to spot patterns, not to judge validity.
+
+{C.DIM}Remember: NmapRST records what happened. Every observation is factual.
+Confidence tells you how consistent those facts are.{C.RESET}
+"""
+    pydoc.pager(text)
+
+# =========================
+# Tutorial
+# =========================
+def show_tutorial():
+    """Complete NmapRST guide"""
+    text = f"""
+{C.BOLD}{C.CYAN}{'=' * 80}
+NMAPRST TUTORIAL
+{'=' * 80}{C.RESET}
+
+{C.BOLD}QUICK START{C.RESET}
+
+{C.GREEN}1. Discover hosts:{C.RESET}
+   nmap -sn 192.168.1.0/24         or: template discovery <target>
+
+{C.GREEN}2. List hosts:{C.RESET}
+   list                            or: list --sort ports-desc
+
+{C.GREEN}3. Scan ports:{C.RESET}
+   nmap -sV 192.168.1.10           or: template quick 192.168.1.10
+
+{C.GREEN}4. View results:{C.RESET}
+   host 1                          Shows aggregated data + notes
+   hosttimeline 1                  Shows changes over time
+   hostdiff 1 last prev            Compares scans
+
+{C.GREEN}5. Document:{C.RESET}
+   note 1 "quick observation"      One-liner note
+   note 1 add                      Multi-line note (auto-prefilled)
+
+{C.BOLD}COMMON NMAP SCANS{C.RESET}
+
+  nmap -sn <target>          Host discovery (no ports)
+  nmap <target>              Default (top 1000 ports)
+  nmap -p- <target>          All 65535 TCP ports
+  nmap -sV <target>          Service version detection
+  nmap -A <target>           OS + version + scripts
+  nmap -sU <target>          UDP scan (slow, needs root)
+
+{C.BOLD}SCAN TEMPLATES{C.RESET}
+
+  template list              List all templates
+  template quick <target>    Fast 100-port scan
+  template full <target>     All ports scan
+  template web <target>      Web services focus
+  template vuln <target>     Vulnerability scripts
+  
+  template add mytest "-sV -p 22,80,443" --desc "Custom test"
+  template delete mytest
+
+{C.BOLD}SORT OPTIONS (--sort){C.RESET}
+
+  ip-asc, ip-desc           Sort by IP address
+  hostname-asc, hostname-desc   Sort by hostname
+  ports-asc, ports-desc     Sort by port count
+  scans-asc, scans-desc     Sort by scan appearances
+
+{C.BOLD}KEY COMMANDS{C.RESET}
+
+  list [--sort <opt>]       List hosts with sorting
+  host <ip>                 View host (with note preview)
+  note <ip> "text"          Quick one-liner note
+  note <ip> add             Multi-line note
+  note <ip> show            Display full note
+  scans                     List all scans
+  search <term> [--notes]   Search everything
+  map [--compact]           Network overview
+  config show               Show configuration
+  help                      Full command reference
+
+{C.BOLD}SHORTCUTS{C.RESET}
+
+  .  or last                Most recent host/scan
+  prev or -1                Second most recent
+  ls, h, hd, ht, t          Common aliases
+
+{C.BOLD}EXAMPLES{C.RESET}
+
+  # Quick scan and notes
+  template quick 192.168.1.10
+  host .
+  note . "Web server - needs SSL cert update"
+  
+  # Compare scans
+  template full 192.168.1.10
+  hostdiff . last prev --classified
+  
+  # Search and investigate
+  search mysql
+  host 1
+  note 1 add
+
+{C.DIM}Type 'philosophy' for core principles
+Type 'help' for complete command reference{C.RESET}
+"""
+    pydoc.pager(text)
+
+# =========================
+# Help
+# =========================
+def show_help():
+    """Comprehensive help"""
+    help_text = f"""
+{C.BOLD}{C.CYAN}{'=' * 80}
+NMAPRST V4.0 COMMAND REFERENCE
+{'=' * 80}{C.RESET}
+
+{C.BOLD}SCANNING{C.RESET}
+  {C.GREEN}nmap <options> <targets>{C.RESET}
+      Run Nmap and store results with integrity hashing
+      
+  {C.GREEN}scans{C.RESET}  {C.DIM}[alias: sc]{C.RESET}
+      List all scans chronologically
+      
+  {C.GREEN}scan <id|last|prev>{C.RESET}  {C.DIM}[alias: s, sd]{C.RESET}
+      Show scan details with context and integrity info
+      
+  {C.GREEN}scanraw <id|last|prev>{C.RESET}  {C.DIM}[alias: sr]{C.RESET}
+      Display complete raw output
+      
+  {C.GREEN}scan verify <id|last|prev>{C.RESET}  {C.DIM}[alias: sv]{C.RESET}
+      Verify scan integrity using SHA256 hashes
+
+{C.BOLD}TEMPLATES{C.RESET}
+  {C.GREEN}template list{C.RESET}  {C.DIM}[alias: t list]{C.RESET}
+      Show all scan templates (built-in + custom)
+      
+  {C.GREEN}template <name> <targets>{C.RESET}  {C.DIM}[alias: t <name>]{C.RESET}
+      Run template scan
+      Examples: template quick 192.168.1.1
+                template vuln scanme.nmap.org
+      
+  {C.GREEN}template add <name> "<flags>" [--desc "..."] [--time "..."]{C.RESET}
+      Create custom template
+      Example: template add webtest "-p 80,443 -sV" --desc "Web check"
+      
+  {C.GREEN}template delete <name>{C.RESET}
+      Delete custom template (built-ins cannot be deleted)
+
+{C.BOLD}HOST ANALYSIS{C.RESET}
+  {C.GREEN}list [--sort <option>]{C.RESET}  {C.DIM}[alias: l, ls]{C.RESET}
+      Show all discovered hosts
+      Sort options: ip-asc, ip-desc, hostname-asc, hostname-desc,
+                    ports-asc, ports-desc, scans-asc, scans-desc
+      
+  {C.GREEN}host <id|ip|.|last|prev> [--export md|json] [--print-safe]{C.RESET}
+      {C.DIM}[alias: h]{C.RESET}
+      Show host details with confidence % and note preview
+      Use '.' or 'last' for most recently viewed
+      Use 'prev' for second most recent
+      
+  {C.GREEN}hostraw <id|ip|.|last|prev>{C.RESET}  {C.DIM}[alias: hr]{C.RESET}
+      Display exact raw Nmap output
+      
+  {C.GREEN}hostdiff <id|ip> <scanA> <scanB> [--classified]{C.RESET}  {C.DIM}[alias: hd]{C.RESET}
+      Compare host between scans
+      --classified: show change classifications with symbols
+      
+  {C.GREEN}hosttimeline <id|ip|.|last|prev>{C.RESET}  {C.DIM}[alias: ht]{C.RESET}
+      ASCII timeline of port/service presence
+
+{C.BOLD}NOTES (Single File, Auto-Prefilled){C.RESET}
+  {C.GREEN}note <id|ip|.|last|prev> "text"{C.RESET}  {C.DIM}[alias: n]{C.RESET}
+      Add one-line note (quick observations)
+      Example: note . "Production web server"
+      
+  {C.GREEN}note <id|ip|.|last|prev> add{C.RESET}
+      Add multi-line note (Ctrl+D to finish)
+      Auto-prefills with discovered host data
+      
+  {C.GREEN}note <id|ip|.|last|prev> show{C.RESET}
+      Display full note
+      
+  {C.GREEN}note <id|ip|.|last|prev> delete{C.RESET}
+      Delete note (requires YES confirmation)
+
+{C.BOLD}NETWORK OVERVIEW{C.RESET}
+  {C.GREEN}map [--compact] [--host <ip>] [--export txt]{C.RESET}
+      Show network map (NO topology inference)
+      --compact: group by service
+      --host <ip>: single host view
+      
+  {C.GREEN}search <term> [--notes]{C.RESET}
+      Search by IP, hostname, port, service, product, version
+      --notes: include note content
+
+{C.BOLD}CONFIGURATION{C.RESET}
+  {C.GREEN}config show{C.RESET}
+      Display current configuration and paths
+      
+  {C.GREEN}config set basedir <path>{C.RESET}
+      Set custom base directory for all data
+      Example: config set basedir /mnt/scans
+      Requires restart to take effect
+
+{C.BOLD}STATISTICS & UTILITIES{C.RESET}
+  {C.GREEN}stats{C.RESET}  {C.DIM}[alias: st]{C.RESET}
+      Database statistics
+      
+  {C.GREEN}clear{C.RESET}  {C.DIM}[alias: cls]{C.RESET}
+      Clear the screen
+      
+  {C.GREEN}confidence explain{C.RESET}  {C.DIM}[alias: conf]{C.RESET}
+      Explain how confidence % is calculated
+      
+  {C.GREEN}philosophy{C.RESET}  {C.DIM}[alias: phil]{C.RESET}
+      Show tool principles and design goals
+      
+  {C.GREEN}tutorial{C.RESET}  {C.DIM}[alias: tut]{C.RESET}
+      Complete Nmap guide with examples
+      
+  {C.GREEN}import <nmap-xml-file>{C.RESET}
+      Import existing Nmap XML scan
+      
+  {C.GREEN}dryrun [on|off]{C.RESET}
+      Enable/disable dry-run mode
+      
+  {C.GREEN}reset{C.RESET}
+      Wipe all data (requires YES)
+      
+  {C.GREEN}help{C.RESET}  {C.DIM}[alias: ?]{C.RESET}
+      Show this help
+      
+  {C.GREEN}version{C.RESET}
+      Show NmapRST version
+      
+  {C.GREEN}exit / quit{C.RESET}  {C.DIM}[alias: q]{C.RESET}
+      Exit
+
+{C.BOLD}V4.0 HIGHLIGHTS{C.RESET}
+  {C.GREEN}✓{C.RESET} Template management (built-in + custom)
+  {C.GREEN}✓{C.RESET} List sorting (8 sort options)
+  {C.GREEN}✓{C.RESET} Simplified single-file notes
+  {C.GREEN}✓{C.RESET} Notes displayed in host summary
+  {C.GREEN}✓{C.RESET} Improved diff with symbols (--classified)
+  {C.GREEN}✓{C.RESET} Custom directory configuration
+  {C.GREEN}✓{C.RESET} One-liner notes: note <ip> "text"
+  {C.GREEN}✓{C.RESET} Streamlined philosophy and docs
+
+{C.BOLD}EXPORT FORMATS{C.RESET}
+  • .md   = Markdown (host reports, print-safe option)
+  • .txt  = Plain text (network maps)
+  • .json = JSON (raw data + metadata)
+
+{C.DIM}Data location: {BASE_DIR}
+Version: {VERSION}
+Philosophy: Raw-First • Deterministic • Traceable • Auditable{C.RESET}
+"""
+    pydoc.pager(help_text)
+
+# =========================
+# REPL
+# =========================
+def repl():
+    """Main interactive loop"""
+    global DRY_RUN
+    
+    index = Index()
+    last_id_map = {}
+    
+    show_banner()
+    
+    if READONLY:
+        print_warning("READ-ONLY MODE - Scans, notes, and resets are disabled")
+        print_info("Unset NMAPRST_READONLY environment variable to enable writes")
+        print()
+
+    while True:
+        try:
+            line = input(prompt()).strip()
+        except EOFError:
+            print("\nGoodbye!")
+            break
+        except KeyboardInterrupt:
+            print("\n^C")
+            continue
+
+        if not line:
+            continue
+
+        try:
+            args = shlex.split(line)
+        except ValueError as e:
+            print_error(f"Invalid syntax: {e}")
+            continue
+
+        cmd = args[0].lower()
+        
+        # Resolve aliases
+        if cmd in COMMAND_ALIASES:
+            alias_value = COMMAND_ALIASES[cmd]
+            if ' ' in alias_value:
+                alias_parts = alias_value.split()
+                cmd = alias_parts[0]
+                args = alias_parts + args[1:]
+            else:
+                cmd = alias_value
+
+        # ============ EXIT ============
+        if cmd in ("exit", "quit"):
+            print("\nGoodbye!")
+            break
+
+        # ============ HELP ============
+        elif cmd == "help":
+            show_help()
+
+        # ============ VERSION ============
+        elif cmd == "version":
+            print(f"NmapRST version {VERSION}")
+            print("Raw-First • Deterministic • Traceable • Auditable")
+
+        # ============ PHILOSOPHY ============
+        elif cmd == "philosophy":
+            show_philosophy()
+
+        # ============ TUTORIAL ============
+        elif cmd == "tutorial":
+            show_tutorial()
+
+        # ============ CONFIDENCE EXPLAIN ============
+        elif cmd == "confidence" and len(args) > 1 and args[1] == "explain":
+            show_confidence_explain()
+        
+        # ============ CLEAR ============
+        elif cmd == "clear":
+            os.system('clear' if os.name == 'posix' else 'cls')
+
+        # ============ CONFIG ============
+        elif cmd == "config":
+            if len(args) < 2:
+                print_error("Usage: config <show|set>")
+                continue
+            
+            if args[1] == "show":
+                print_header("Configuration")
+                print(f"  Base directory:  {BASE_DIR}")
+                print(f"  Scans:           {SCANS_DIR}")
+                print(f"  Notes:           {NOTES_DIR}")
+                print(f"  Exports:         {EXPORT_DIR}")
+                print(f"  Templates:       {TEMPLATES_FILE}")
+                print(f"  Index:           {INDEX_FILE}")
+                print()
+            
+            elif args[1] == "set" and len(args) > 3 and args[2] == "basedir":
+                new_base = Path(args[3]).expanduser()
+                save_config(new_base)
+                print_success(f"Base directory set to: {new_base}")
+                print_warning("Restart NmapRST for changes to take effect")
+            
+            else:
+                print_error("Usage: config show | config set basedir <path>")
+
+        # ============ DRY-RUN ============
+        elif cmd == "dryrun":
+            if len(args) < 2:
+                print(f"Dry-run mode: {'ON' if DRY_RUN else 'OFF'}")
+            elif args[1].lower() == "on":
+                DRY_RUN = True
+                print_warning("Dry-run mode ENABLED - no changes will be saved")
+            elif args[1].lower() == "off":
+                DRY_RUN = False
+                print_success("Dry-run mode DISABLED")
+            else:
+                print_error("Usage: dryrun [on|off]")
+
+        # ============ RESET ============
+        elif cmd == "reset":
+            if not check_readonly("reset database"):
+                continue
+            
+            print_warning("Delete ALL data: scans, notes, exports!")
+            confirm = input(f"Type {C.BOLD}YES{C.RESET} to confirm: ")
+            if confirm == "YES":
+                if not DRY_RUN:
+                    for f in SCANS_DIR.glob("*"):
+                        f.unlink()
+                    for f in NOTES_DIR.glob("*"):
+                        f.unlink()
+                    for f in EXPORT_DIR.glob("*"):
+                        f.unlink()
+                    index.reset()
+                    last_id_map.clear()
+                print_success("All data wiped" if not DRY_RUN else "[DRY-RUN] Would wipe all data")
+            else:
+                print_info("Reset aborted")
+
+        # ============ STATS ============
+        elif cmd == "stats":
+            print_header("Database Statistics")
+            
+            total_scans = index.data['meta']['scan_count']
+            total_hosts = len(index.data['hosts'])
+            tcp_count, udp_count = count_protocol_ports(index)
+            total_ports = tcp_count + udp_count
+            
+            print(f"{C.BOLD}General:{C.RESET}")
+            print(f"  Version:            {VERSION}")
+            print(f"  Total scans:        {total_scans}")
+            print(f"  Total hosts:        {total_hosts}")
+            print(f"  Total open ports:   {total_ports}")
+            print(f"  ├─ TCP:             {tcp_count}")
+            print(f"  └─ UDP:             {udp_count}")
+            print(f"  Database created:   {format_timestamp(index.data['meta'].get('created', 'unknown'))}")
+            print(f"  Storage location:   {BASE_DIR}")
+            
+            if INDEX_FILE.exists():
+                print(f"  Index size:         {INDEX_FILE.stat().st_size / 1024:.2f} KB")
+            
+            total_notes = len(list(NOTES_DIR.glob("*.txt")))
+            print(f"  Host notes:         {total_notes}")
+            
+            top_services = get_top_services(index, 5)
+            if top_services:
+                print(f"\n{C.BOLD}Top 5 Services:{C.RESET}")
+                for svc, count in top_services:
+                    print(f"  {count:>3}× {svc}")
+            
+            top_products = get_top_products(index, 5)
+            if top_products:
+                print(f"\n{C.BOLD}Top 5 Products:{C.RESET}")
+                for prod, count in top_products:
+                    print(f"  {count:>3}× {prod}")
+            
+            top_hosts = get_hosts_by_port_count(index, 5)
+            if top_hosts:
+                print(f"\n{C.BOLD}Hosts with Most Ports:{C.RESET}")
+                for ip, count in top_hosts:
+                    hn, _ = resolve_field(index.data['hosts'][ip].get('hostname', []))
+                    name = f" ({hn})" if hn else ""
+                    print(f"  {ip:<15}{name:<20} {count} ports")
+            
+            print()
+
+        # ============ LIST ============
+        elif cmd == "list":
+            hosts = index.data["hosts"]
+            if not hosts:
+                print_info("No hosts discovered yet")
+                print_info("")
+                print_info("To get started:")
+                print_info("  1. Run: nmap -sV <target>")
+                print_info("  2. Or: template quick <target>")
+                print_info("  3. Try: tutorial")
+                continue
+
+            # Parse sort option
+            sort_by = "ip-asc"
+            if "--sort" in args:
+                idx = args.index("--sort")
+                if idx + 1 < len(args):
+                    sort_by = args[idx + 1]
+            
+            sorted_hosts = sort_hosts(hosts, sort_by)
+
+            print_header("Discovered Hosts")
+            print(f"  {C.BOLD}{'ID':<4} {'IP':<16} {'HOSTNAME':<25} {'MAC':<18} {'PORTS':<6} {'SCANS'}{C.RESET}")
+            print(f"  {C.DIM}{'─' * 90}{C.RESET}")
+
+            last_id_map.clear()
+            for i, (ip, h) in enumerate(sorted_hosts, 1):
+                hostname, _ = resolve_field(h["hostname"])
+                mac, _ = resolve_field(h["mac"])
+                
+                if hostname and len(hostname) > 25:
+                    hostname = hostname[:22] + "..."
+                
+                print(f"  {C.GREEN}{i:02d}{C.RESET}   {ip:<16} {hostname or C.DIM + '--' + C.RESET:<25} "
+                      f"{mac or C.DIM + '--' + C.RESET:<18} {len(h['ports']):>6} {len(h['seen_in']):>5}")
+                last_id_map[str(i)] = ip
+            
+            print(f"\n{C.DIM}Sorted by: {sort_by} | Use --sort <option> to change{C.RESET}\n")
+
+        # ============ SCANS ============
+        elif cmd == "scans":
+            scans = index.data["scans"]
+            if not scans:
+                print_info("No scans recorded yet")
+                print_info("")
+                print_info("Run a scan to begin:")
+                print_info("  nmap -sV <target>")
+                print_info("  template quick <target>")
+                continue
+
+            print_header("Scan History")
+            print(f"  {C.BOLD}{'SCAN':<6} {'DATE & TIME':<20} {'HOSTS':<6} {'HASH':<10} COMMAND{C.RESET}")
+            print(f"  {C.DIM}{'─' * 6} {'─' * 20} {'─' * 6} {'─' * 10} {'─' * 30}{C.RESET}")
+
+            for scan_id in sorted(scans.keys(), key=int):
+                scan_data = scans[scan_id]
+                timestamp = format_timestamp(scan_data.get('time', 'N/A'))
+                command = scan_data.get('command', 'N/A')
+                host_count = len(scan_data.get('hosts', {}))
+                
+                has_hash = "✓" if "hashes" in scan_data else "✗"
+                
+                if len(command) > 40:
+                    command = command[:37] + "..."
+                
+                print(f"  {C.CYAN}#{scan_id:<5}{C.RESET} {timestamp:<20} {host_count:>6} {has_hash:<10} {command}")
+            
+            print(f"\n{C.DIM}Tip: Use 'scan <ID>' for details{C.RESET}\n")
+
+        # ============ SCAN ============
+        elif cmd == "scan":
+            if len(args) < 2:
+                print_error("Usage: scan <id|last|prev|verify> <id>")
+                continue
+
+            if args[1] == "verify":
+                if len(args) < 3:
+                    print_error("Usage: scan verify <id|last|prev>")
+                    continue
+                
+                scan_id = resolve_scan_id(args[2], index)
+                if not scan_id or scan_id not in index.data["scans"]:
+                    print_error(f"Scan not found: {args[2]}")
+                    continue
+                
+                scan_data = index.data["scans"][scan_id]
+                
+                if "hashes" not in scan_data:
+                    print_warning(f"Scan #{scan_id} has no hashes (pre-V3 scan)")
+                    continue
+                
+                print_header(f"Verifying Scan #{scan_id}")
+                
+                txt_file = SCANS_DIR / f"scan_{scan_id}.txt"
+                xml_file = SCANS_DIR / f"scan_{scan_id}.xml"
+                
+                stored_hashes = scan_data["hashes"]
+                
+                if txt_file.exists():
+                    current_txt_hash = sha256_file(txt_file)
+                    if current_txt_hash == stored_hashes.get("txt"):
+                        print(f"  {C.GREEN}✓{C.RESET} TXT file verified")
+                    else:
+                        print(f"  {C.RED}✗{C.RESET} TXT file MODIFIED!")
+                        print(f"    Expected: {stored_hashes.get('txt')[:16]}...")
+                        print(f"    Current:  {current_txt_hash[:16]}...")
+                else:
+                    print(f"  {C.RED}✗{C.RESET} TXT file MISSING")
+                
+                if xml_file.exists():
+                    current_xml_hash = sha256_file(xml_file)
+                    if current_xml_hash == stored_hashes.get("xml"):
+                        print(f"  {C.GREEN}✓{C.RESET} XML file verified")
+                    else:
+                        print(f"  {C.RED}✗{C.RESET} XML file MODIFIED!")
+                        print(f"    Expected: {stored_hashes.get('xml')[:16]}...")
+                        print(f"    Current:  {current_xml_hash[:16]}...")
+                else:
+                    print(f"  {C.RED}✗{C.RESET} XML file MISSING")
+                
+                print()
+            else:
+                scan_id = resolve_scan_id(args[1], index)
+                if not scan_id or scan_id not in index.data["scans"]:
+                    print_error(f"Scan not found: {args[1]}")
+                    continue
+
+                show_scan_details(scan_id, index.data["scans"][scan_id], index)
+
+        # ============ SCANRAW ============
+        elif cmd == "scanraw":
+            if len(args) < 2:
+                print_error("Usage: scanraw <id|last|prev>")
+                continue
+
+            scan_id = resolve_scan_id(args[1], index)
+            if not scan_id or scan_id not in index.data["scans"]:
+                print_error(f"Scan not found: {args[1]}")
+                continue
+
+            show_scan_raw(index, scan_id)
+
+        # ============ TEMPLATE ============
+        elif cmd == "template":
+            if len(args) < 2:
+                print_error("Usage: template <list|add|delete|name> [options]")
+                continue
+            
+            action = args[1].lower()
+            
+            if action == "list":
+                templates = TemplateManager.load_templates()
+                if not templates:
+                    print_info("No templates available")
+                    continue
+                
+                print_header("Scan Templates")
+                print(f"  {C.BOLD}{'NAME':<15} {'FLAGS':<35} {'TIME':<15} {'TYPE'}{C.RESET}")
+                print(f"  {C.DIM}{'-' * 85}{C.RESET}")
+                
+                for name, data in sorted(templates.items()):
+                    flags = data['flags']
+                    if len(flags) > 35:
+                        flags = flags[:32] + "..."
+                    time_est = data.get('time', '-')
+                    ttype = "built-in" if data.get('builtin') else "custom"
+                    color = C.CYAN if data.get('builtin') else C.GREEN
+                    print(f"  {color}{name:<15}{C.RESET} {flags:<35} {time_est:<15} {ttype}")
+                
+                print(f"\n{C.DIM}Usage: template <name> <targets>{C.RESET}\n")
+            
+            elif action == "add":
+                if len(args) < 4:
+                    print_error("Usage: template add <name> \"<flags>\" [--desc \"...\"] [--time \"...\"]")
+                    continue
+                
+                if not check_readonly("add templates"):
+                    continue
+                
+                name = args[2]
+                flags = args[3]
+                
+                desc = ""
+                time_est = ""
+                
+                if "--desc" in args:
+                    idx = args.index("--desc")
+                    if idx + 1 < len(args):
+                        desc = args[idx + 1]
+                
+                if "--time" in args:
+                    idx = args.index("--time")
+                    if idx + 1 < len(args):
+                        time_est = args[idx + 1]
+                
+                success, msg = TemplateManager.add_template(name, flags, desc, time_est)
+                if success:
+                    print_success(msg)
+                else:
+                    print_error(msg)
+            
+            elif action == "delete":
+                if len(args) < 3:
+                    print_error("Usage: template delete <name>")
+                    continue
+                
+                if not check_readonly("delete templates"):
+                    continue
+                
+                success, msg = TemplateManager.delete_template(args[2])
+                if success:
+                    print_success(msg)
+                else:
+                    print_error(msg)
+            
+            else:
+                # Try to run template
+                template_name = action
+                template = TemplateManager.get_template(template_name)
+                
+                if not template:
+                    print_error(f"Template '{template_name}' not found")
+                    print_info("Use 'template list' to see available templates")
+                    continue
+                
+                if not check_readonly("run scans"):
+                    continue
+                
+                targets = args[2:]
+                if not targets:
+                    print_error("Usage: template <name> <targets>")
+                    continue
+                
+                targets = validate_targets(targets)
+                if not targets:
+                    print_error("No valid targets")
+                    continue
+                
+                print_info(f"Using template '{template_name}': {template['flags']}")
+                
+                template_flags = shlex.split(template['flags'])
+                
+                if DRY_RUN:
+                    print_info(f"[DRY-RUN] Would run: nmap {template['flags']} {' '.join(targets)}")
+                    continue
+                
+                scan_id = get_next_safe_scan_id(index)
+                if not scan_id:
+                    print_error("Cannot determine safe scan ID")
+                    continue
+                
+                index.data["meta"]["scan_count"] = scan_id
+                
+                out_xml = SCANS_DIR / f"scan_{scan_id}.xml"
+                out_txt = SCANS_DIR / f"scan_{scan_id}.txt"
+                
+                if out_txt.exists() or out_xml.exists():
+                    print_error(f"CRITICAL: Scan #{scan_id} files exist!")
+                    continue
+                
+                cmdline = ["nmap", "-oX", str(out_xml)] + template_flags + targets
+                
+                context = get_scan_context()
+                
+                index.data["scans"][str(scan_id)] = {
+                    "time": now_utc(),
+                    "command": " ".join(cmdline),
+                    "hosts": {},
+                    "context": context,
+                }
+                index.save()
+                
+                print_header(f"Running Scan #{scan_id}")
+                print(f"{C.BOLD}Template:{C.RESET} {template_name}")
+                print(f"{C.BOLD}Command:{C.RESET} {' '.join(cmdline)}\n")
+                print_separator("═")
+                
+                try:
+                    with open(out_txt, "w") as f:
+                        proc = subprocess.Popen(cmdline, stdout=subprocess.PIPE,
+                                              stderr=subprocess.STDOUT, text=True)
+                        for line in proc.stdout:
+                            print(line, end="")
+                            f.write(line)
+                        proc.wait()
+                    
+                    if proc.returncode != 0:
+                        print_error(f"Scan failed with code {proc.returncode}")
+                        continue
+                    
+                    index.data["scans"][str(scan_id)]["hashes"] = {
+                        "txt": sha256_file(out_txt),
+                        "xml": sha256_file(out_xml),
+                    }
+                    
+                    print_separator("═")
+                    print(f"\n{C.CYAN}Parsing results...{C.RESET}")
+                    parse_scan(out_xml, scan_id, index)
+                    
+                    scan_data = index.data["scans"][str(scan_id)]
+                    hosts_found = len(scan_data.get("hosts", {}))
+                    
+                    warnings = check_scan_suspicious(scan_data, hosts_found)
+                    
+                    if warnings:
+                        print()
+                        print_header("⚠ Scan Analysis")
+                        for warning in warnings:
+                            if warning.startswith("  "):
+                                print(f"{C.DIM}{warning}{C.RESET}")
+                            else:
+                                print_warning(warning)
+                        print()
+                    
+                    print_success(f"Scan #{scan_id} completed and verified")
+                    print_info(f"Use 'scan {scan_id}' or 'list' to view\n")
+                
+                except FileNotFoundError:
+                    print_error("Nmap not found. Install nmap first.")
+                except Exception as e:
+                    print_error(f"Scan error: {e}")
+
+        # ============ HOST ============
+        elif cmd == "host":
+            if len(args) < 2:
+                print_error("Usage: host <id|ip|.|last|prev> [--export md|json] [--print-safe]")
+                continue
+
+            sel = args[1]
+            export_format = None
+            print_safe = "--print-safe" in args
+            
+            if "--export" in args:
+                idx = args.index("--export")
+                if idx + 1 < len(args):
+                    export_format = args[idx + 1]
+            
+            ip = resolve_host_ip(sel, last_id_map)
+            
+            if not ip:
+                print_error(f"Invalid host reference: {sel}")
+                print_info("Run 'list' first or use an IP address")
+                continue
+
+            if ip not in index.data["hosts"]:
+                print_error(f"Host '{ip}' not found")
+                continue
+
+            if export_format:
+                if export_format == "md":
+                    content = Exporter.export_host_markdown(index, ip, print_safe=print_safe)
+                    if content:
+                        safe_ip = ip.replace(":", "_").replace(".", "_")
+                        filepath = EXPORT_DIR / f"host_{safe_ip}.md"
+                        if not DRY_RUN:
+                            filepath.write_text(content)
+                        print_success(f"Exported to: {filepath}" if not DRY_RUN else f"[DRY-RUN] Would export to: {filepath}")
+                elif export_format == "json":
+                    host_data = {"host": index.data["hosts"][ip]}
+                    content = json.dumps(host_data, indent=2)
+                    safe_ip = ip.replace(":", "_").replace(".", "_")
+                    filepath = EXPORT_DIR / f"host_{safe_ip}.json"
+                    if not DRY_RUN:
+                        filepath.write_text(content)
+                    print_success(f"Exported to: {filepath}" if not DRY_RUN else f"[DRY-RUN] Would export to: {filepath}")
+                else:
+                    print_error(f"Unknown format: {export_format}")
+            else:
+                host = index.data["hosts"][ip]
+                prev_scan = None
+                if len(host["seen_in"]) > 1:
+                    prev_scan = host["seen_in"][-1]
+                show_host_summary(ip, host, index, prev_scan)
+
+        # ============ HOSTRAW ============
+        elif cmd == "hostraw":
+            if len(args) < 2:
+                print_error("Usage: hostraw <id|ip|.|last|prev>")
+                continue
+
+            sel = args[1]
+            ip = resolve_host_ip(sel, last_id_map)
+            
+            if not ip:
+                print_error(f"Invalid host: {sel}")
+                continue
+
+            if ip not in index.data["hosts"]:
+                print_error(f"Host '{ip}' not found")
+                continue
+
+            output = []
+            for sid in sorted(index.data["scans"], key=int):
+                txt = SCANS_DIR / f"scan_{sid}.txt"
+                block = extract_host_block(txt, ip)
+                if block:
+                    output.append(f"{C.BOLD}{C.CYAN}{'=' * 64}")
+                    output.append(f"SCAN #{sid}")
+                    output.append(f"{'=' * 64}{C.RESET}\n")
+                    output.append(block)
+                    output.append("\n")
+
+            if output:
+                pydoc.pager("\n".join(output))
+            else:
+                print_warning("No raw output found")
+
+        # ============ HOSTDIFF ============
+        elif cmd == "hostdiff":
+            if len(args) < 4:
+                print_error("Usage: hostdiff <id|ip|.|last|prev> <scanA|last|prev> <scanB|last|prev> [--classified]")
+                continue
+
+            sel = args[1]
+            classified = "--classified" in args
+            
+            ip = resolve_host_ip(sel, last_id_map)
+            scan_a = resolve_scan_id(args[2], index)
+            scan_b = resolve_scan_id(args[3], index)
+            
+            if not ip:
+                print_error(f"Invalid host: {sel}")
+                continue
+
+            if ip not in index.data["hosts"]:
+                print_error(f"Host '{ip}' not found")
+                continue
+            
+            if not scan_a or not scan_b:
+                print_error("Invalid scan references")
+                continue
+
+            if scan_a not in index.data["scans"] or scan_b not in index.data["scans"]:
+                print_error("One or both scans not found")
+                continue
+            
+            if scan_a == scan_b:
+                print_warning("Both scans are the same - no differences to show")
+                continue
+
+            show_host_diff(index, ip, int(scan_a), int(scan_b), classified)
+
+        # ============ HOSTTIMELINE ============
+        elif cmd == "hosttimeline":
+            if len(args) < 2:
+                print_error("Usage: hosttimeline <id|ip|.|last|prev>")
+                continue
+
+            sel = args[1]
+            ip = resolve_host_ip(sel, last_id_map)
+            
+            if not ip:
+                print_error(f"Invalid host: {sel}")
+                continue
+
+            if ip not in index.data["hosts"]:
+                print_error(f"Host '{ip}' not found")
+                continue
+
+            show_host_timeline(index, ip)
+
+        # ============ MAP ============
+        elif cmd == "map":
+            mode = "default"
+            filter_ip = None
+            export_format = None
+            
+            i = 1
+            while i < len(args):
+                if args[i] == "--compact":
+                    mode = "compact"
+                elif args[i] == "--host" and i + 1 < len(args):
+                    filter_ip = args[i + 1]
+                    i += 1
+                elif args[i] == "--export" and i + 1 < len(args):
+                    export_format = args[i + 1]
+                    i += 1
+                i += 1
+            
+            if export_format:
+                if export_format == "txt":
+                    content = Exporter.export_map_text(index, mode)
+                    filepath = EXPORT_DIR / "network_map.txt"
+                    if not DRY_RUN:
+                        filepath.write_text(content)
+                    print_success(f"Exported to: {filepath}" if not DRY_RUN else f"[DRY-RUN] Would export to: {filepath}")
+                elif export_format == "json":
+                    content = json.dumps(index.data, indent=2)
+                    filepath = EXPORT_DIR / "network_map.json"
+                    if not DRY_RUN:
+                        filepath.write_text(content)
+                    print_success(f"Exported to: {filepath}" if not DRY_RUN else f"[DRY-RUN] Would export to: {filepath}")
+                else:
+                    print_error(f"Unknown format: {export_format}")
+            else:
+                show_map(index, mode, filter_ip)
+
+        # ============ NOTE ============
+        elif cmd == "note":
+            if len(args) < 2:
+                print_error("Usage: note <id|ip|.|last|prev> <add|\"text\"|show|delete>")
+                continue
+
+            sel = args[1]
+            ip = resolve_host_ip(sel, last_id_map)
+            
+            if not ip:
+                print_error(f"Invalid host: {sel}")
+                continue
+
+            if ip not in index.data["hosts"]:
+                print_error(f"Host '{ip}' not found")
+                continue
+            
+            # Check for one-liner note
+            if len(args) >= 3 and args[2] not in ("add", "show", "delete"):
+                if not check_readonly("add notes"):
+                    continue
+                
+                note_text = " ".join(args[2:])
+                
+                if not DRY_RUN:
+                    NotesManager.save_note(ip, note_text)
+                    print_success("Note saved")
+                else:
+                    print_success("[DRY-RUN] Would save note")
+                continue
+            
+            if len(args) < 3:
+                print_error("Usage: note <id|ip|.|last|prev> <add|\"text\"|show|delete>")
+                continue
+            
+            action = args[2].lower()
+
+            if action == "add":
+                if not check_readonly("add notes"):
+                    continue
+                
+                prefill = generate_note_prefill(index, ip)
+                    
+                print(f"\n{C.BOLD}Add note for {ip}{C.RESET}")
+                print(f"{C.DIM}Pre-filled with discovered data. Edit as needed.{C.RESET}")
+                print("Enter additional notes (Ctrl+D or empty line to finish):")
+                print(f"{C.DIM}{'─' * 60}{C.RESET}")
+                
+                if prefill:
+                    for line in prefill.split("\n"):
+                        print(f"{C.DIM}{line}{C.RESET}")
+                
+                lines = []
+                try:
+                    while True:
+                        line = input()
+                        if not line:
+                            break
+                        lines.append(line)
+                except EOFError:
+                    pass
+                
+                user_content = "\n".join(lines).strip()
+                if user_content:
+                    final_content = prefill + user_content
+                else:
+                    final_content = prefill.strip()
+                
+                if final_content:
+                    if not DRY_RUN:
+                        NotesManager.save_note(ip, final_content)
+                        print(f"{C.DIM}{'─' * 60}{C.RESET}")
+                        print_success("Note saved")
+                    else:
+                        print(f"{C.DIM}{'─' * 60}{C.RESET}")
+                        print_success("[DRY-RUN] Would save note")
+                else:
+                    print_warning("Empty note discarded")
+
+            elif action == "show":
+                note = NotesManager.load_note(ip)
+                if note:
+                    print_header(f"Note for {ip}")
+                    print(note)
+                    print()
+                else:
+                    print_info(f"No note for {ip}")
+                    print_info("Add a note with: note . add")
+
+            elif action == "delete":
+                if not check_readonly("delete notes"):
+                    continue
+                    
+                note = NotesManager.load_note(ip)
+                if not note:
+                    print_error(f"No note for {ip}")
+                    continue
+                
+                print_warning(f"Delete note for {ip}?")
+                preview = note.split("\n")[:3]
+                for line in preview:
+                    print(f"  {line}")
+                if len(note.split("\n")) > 3:
+                    print(f"  {C.DIM}...{C.RESET}")
+                
+                confirm = input(f"\nType {C.BOLD}YES{C.RESET} to confirm: ")
+                
+                if confirm == "YES":
+                    if NotesManager.delete_note(ip):
+                        print_success("Note deleted" if not DRY_RUN else "[DRY-RUN] Would delete note")
+                    else:
+                        print_error("Failed to delete")
+                else:
+                    print_info("Delete aborted")
+
+            else:
+                print_error(f"Unknown action: {action}")
+                print_info("Valid: add, show, delete, or \"text\" for one-liner")
+
+        # ============ SEARCH ============
+        elif cmd == "search":
+            if len(args) < 2:
+                print_error("Usage: search <term> [--notes]")
+                continue
+
+            term = args[1]
+            search_notes = "--notes" in args
+            
+            results = search_hosts(index, term, search_notes)
+
+            if results:
+                print_header(f"Search Results for '{term}'")
+                print(f"  {C.BOLD}{'IP':<16} {'MATCH':<40} {'FIRST':<8} {'LAST'}{C.RESET}")
+                print(f"  {C.DIM}{'─' * 16} {'─' * 40} {'─' * 8} {'─' * 8}{C.RESET}")
+                
+                for result in results:
+                    ip = result["ip"]
+                    first = f"#{result['first_seen']}"
+                    last = f"#{result['last_seen']}"
+                    
+                    first_match = result["matches"][0]
+                    match_type, match_value = first_match
+                    match_display = f"{match_type}: {match_value}"
+                    if len(match_display) > 40:
+                        match_display = match_display[:37] + "..."
+                    
+                    print(f"  {C.GREEN}{ip:<16}{C.RESET} {match_display:<40} {first:<8} {last}")
+                    
+                    for match_type, match_value in result["matches"][1:]:
+                        match_display = f"{match_type}: {match_value}"
+                        if len(match_display) > 40:
+                            match_display = match_display[:37] + "..."
+                        print(f"  {' ' * 16} {C.DIM}{match_display}{C.RESET}")
+                
+                print(f"\n{C.DIM}Found {len(results)} host(s){C.RESET}\n")
+            else:
+                print_info(f"No results for '{term}'")
+
+        # ============ IMPORT ============
+        elif cmd == "import":
+            if len(args) < 2:
+                print_error("Usage: import <nmap-xml-file>")
+                continue
+            
+            xml_path = Path(args[1])
+            if not xml_path.exists():
+                print_error(f"File not found: {xml_path}")
+                continue
+            
+            if DRY_RUN:
+                print_info(f"[DRY-RUN] Would import {xml_path}")
+                continue
+            
+            index.data["meta"]["scan_count"] += 1
+            scan_id = index.data["meta"]["scan_count"]
+            
+            dest_xml = SCANS_DIR / f"scan_{scan_id}.xml"
+            dest_txt = SCANS_DIR / f"scan_{scan_id}.txt"
+            
+            shutil.copy(xml_path, dest_xml)
+            
+            txt_path = xml_path.with_suffix('.txt')
+            if txt_path.exists():
+                shutil.copy(txt_path, dest_txt)
+            else:
+                dest_txt.write_text(f"# Imported scan - raw output not available\n# Source: {xml_path}\n")
+            
+            index.data["scans"][str(scan_id)] = {
+                "time": now_utc(),
+                "command": f"imported from {xml_path}",
+                "hosts": {},
+                "context": {
+                    "user": getpass.getuser(),
+                    "hostname": platform.node(),
+                    "import_source": str(xml_path),
+                    "import_time": now_utc(),
+                },
+                "hashes": {
+                    "xml": sha256_file(dest_xml),
+                    "txt": sha256_file(dest_txt),
+                }
+            }
+            
+            print(f"Importing scan as #{scan_id}...")
+            parse_scan(dest_xml, scan_id, index)
+            print_success(f"Imported as scan #{scan_id}")
+
+        # ============ NMAP ============
+        elif cmd == "nmap":
+            if not check_readonly("run scans"):
+                continue
+            
+            opts, targets = [], []
+            for a in args[1:]:
+                if a.startswith("-"):
+                    opts.append(a)
+                else:
+                    targets.append(a)
+
+            targets = validate_targets(targets)
+            if not targets:
+                print_error("No valid targets")
+                continue
+
+            if DRY_RUN:
+                print_info(f"[DRY-RUN] Would run: nmap {' '.join(opts)} {' '.join(targets)}")
+                continue
+
+            scan_id = get_next_safe_scan_id(index)
+            if not scan_id:
+                print_error("Cannot determine safe scan ID")
+                continue
+            
+            index.data["meta"]["scan_count"] = scan_id
+
+            out_xml = SCANS_DIR / f"scan_{scan_id}.xml"
+            out_txt = SCANS_DIR / f"scan_{scan_id}.txt"
+            
+            if out_txt.exists() or out_xml.exists():
+                print_error(f"CRITICAL: Scan #{scan_id} files exist!")
+                continue
+
+            cmdline = ["nmap", "-oX", str(out_xml)] + opts + targets
+            
+            context = get_scan_context()
+            
+            index.data["scans"][str(scan_id)] = {
+                "time": now_utc(),
+                "command": " ".join(cmdline),
+                "hosts": {},
+                "context": context,
+            }
+            index.save()
+
+            print_header(f"Running Scan #{scan_id}")
+            print(f"{C.BOLD}Command:{C.RESET} {' '.join(cmdline)}")
+            print(f"{C.DIM}User: {context['user']}@{context['hostname']}{C.RESET}\n")
+            print_separator("═")
+
+            try:
+                with open(out_txt, "w") as f:
+                    proc = subprocess.Popen(
+                        cmdline,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True
+                    )
+                    for line in proc.stdout:
+                        print(line, end="")
+                        f.write(line)
+                    proc.wait()
+
+                if proc.returncode != 0:
+                    print_error(f"Scan failed with code {proc.returncode}")
+                    continue
+
+                index.data["scans"][str(scan_id)]["hashes"] = {
+                    "txt": sha256_file(out_txt),
+                    "xml": sha256_file(out_xml),
+                }
+
+                print_separator("═")
+                print(f"\n{C.CYAN}Parsing results...{C.RESET}")
+                parse_scan(out_xml, scan_id, index)
+                
+                scan_data = index.data["scans"][str(scan_id)]
+                hosts_found = len(scan_data.get("hosts", {}))
+                
+                warnings = check_scan_suspicious(scan_data, hosts_found)
+                
+                if warnings:
+                    print()
+                    print_header("⚠ Scan Analysis")
+                    for warning in warnings:
+                        if warning.startswith("  "):
+                            print(f"{C.DIM}{warning}{C.RESET}")
+                        else:
+                            print_warning(warning)
+                    print()
+                
+                print_success(f"Scan #{scan_id} completed and verified")
+                print_info(f"Use 'scan {scan_id}' or 'list' to view\n")
+
+            except FileNotFoundError:
+                print_error("Nmap not found. Install nmap first.")
+            except Exception as e:
+                print_error(f"Scan error: {e}")
+
+        # ============ UNKNOWN ============
+        else:
+            matches = difflib.get_close_matches(
+                cmd,
+                ["nmap", "list", "scans", "scan", "scanraw", "template", "host", "hostraw", 
+                 "hostdiff", "hosttimeline", "map", "note", "search", "import", "config",
+                 "stats", "confidence", "philosophy", "tutorial", "dryrun",
+                 "reset", "help", "version"],
+                n=3,
+                cutoff=0.6
+            )
+            print_error(f"Unknown command: {cmd}")
+            if matches:
+                print_info(f"Did you mean: {', '.join(matches)}?")
+            print_info("Type 'help' for command list")
+
+if __name__ == "__main__":
+    try:
+        repl()
+    except KeyboardInterrupt:
+        print("\n\nGoodbye!")
+        sys.exit(0)
